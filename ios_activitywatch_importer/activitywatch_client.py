@@ -26,6 +26,7 @@ def _parse_iso_datetime(value: str) -> datetime:
 @dataclass(frozen=True)
 class ActivityWatchClient:
     api_url: str
+    request_timeout_seconds: float = 5.0
 
     def _request(self, method: str, path: str, payload: Any | None = None) -> tuple[int, Any]:
         url = f"{self.api_url.rstrip('/')}{path}"
@@ -37,7 +38,7 @@ class ActivityWatchClient:
 
         request = Request(url, data=data, headers=headers, method=method)
         try:
-            with urlopen(request, timeout=20) as response:
+            with urlopen(request, timeout=self.request_timeout_seconds) as response:
                 body = response.read().decode("utf-8")
                 if not body.strip():
                     return response.status, None
@@ -55,8 +56,11 @@ class ActivityWatchClient:
                 return exc.code, parsed
             finally:
                 exc.close()
-        except URLError as exc:
-            raise ActivityWatchError(f"ActivityWatch is not reachable: {exc.reason}") from exc
+        except (URLError, TimeoutError, ConnectionError, OSError) as exc:
+            reason = getattr(exc, "reason", None)
+            if reason is None:
+                reason = str(exc)
+            raise ActivityWatchError(f"ActivityWatch is not reachable: {reason}") from exc
 
     def ensure_bucket(
         self,

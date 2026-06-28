@@ -42,6 +42,6 @@ class ImporterTests(unittest.TestCase):
 
             self.assertEqual(csv_path, root / "debugOut" / "knowledgeC.recognized-events.csv")
             content = csv_path.read_text(encoding="utf-8")
-            self.assertIn("start_utc,end_utc,duration_seconds,app,bundle_id,target_bundle_id,title,domain_identifier,sender,account", content)
+            self.assertIn("start_utc,end_utc,duration_seconds,count,app,bundle_id,target_bundle_id,title,domain_identifier,sender,account", content)
             self.assertIn("WhatsApp", content)
             self.assertIn("Family", content)

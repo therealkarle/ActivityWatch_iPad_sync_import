@@ -48,6 +48,7 @@ def _write_debug_csv(events, root_dir: Path) -> Path:
         "start_utc",
         "end_utc",
         "duration_seconds",
+        "count",
         "app",
         "bundle_id",
         "target_bundle_id",
@@ -66,6 +67,7 @@ def _write_debug_csv(events, root_dir: Path) -> Path:
                     "start_utc": _format_dt(event.start),
                     "end_utc": _format_dt(event.end),
                     "duration_seconds": f"{event.duration_seconds:.6f}",
+                    "count": getattr(event, "count", 1),
                     "app": event.app,
                     "bundle_id": data.get("bundle_id", ""),
                     "target_bundle_id": data.get("target_bundle_id", ""),
@@ -144,6 +146,8 @@ def run_import(config: AppConfig, *, verbose: bool = False) -> int:
         if events:
             print(f"First event: {_format_dt(events[0].start)} -> {_format_dt(events[0].end)}")
             print(f"Last event: {_format_dt(events[-1].start)} -> {_format_dt(events[-1].end)}")
+            print(f"First duration: {events[0].duration_seconds:.1f}s")
+            print(f"Last duration: {events[-1].duration_seconds:.1f}s")
             print(f"First app: {events[0].app}")
             print(f"Last app: {events[-1].app}")
     if not events:

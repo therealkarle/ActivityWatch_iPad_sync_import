@@ -39,7 +39,7 @@ class ScreenTimeTests(unittest.TestCase):
             events = load_screen_time_events(db_path)
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0].app, "Safari")
-            self.assertEqual(events[0].duration_seconds, 10.0)
+            self.assertEqual(events[0].duration_seconds, 30.0)
 
     def test_extraction_from_interaction_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -49,14 +49,19 @@ class ScreenTimeTests(unittest.TestCase):
                 """
                 CREATE TABLE ZINTERACTIONS (
                     ZBUNDLEID TEXT,
+                    ZGROUPNAME TEXT,
                     ZSTARTDATE REAL,
                     ZENDDATE REAL
                 )
                 """
             )
             conn.execute(
-                "INSERT INTO ZINTERACTIONS (ZBUNDLEID, ZSTARTDATE, ZENDDATE) VALUES (?, ?, ?)",
-                ("net.whatsapp.WhatsApp", 30.0, 30.0),
+                "INSERT INTO ZINTERACTIONS (ZBUNDLEID, ZGROUPNAME, ZSTARTDATE, ZENDDATE) VALUES (?, ?, ?, ?)",
+                ("net.whatsapp.WhatsApp", "Family", 30.0, 30.0),
+            )
+            conn.execute(
+                "INSERT INTO ZINTERACTIONS (ZBUNDLEID, ZGROUPNAME, ZSTARTDATE, ZENDDATE) VALUES (?, ?, ?, ?)",
+                ("net.whatsapp.WhatsApp", "Family", 90.0, 90.0),
             )
             conn.commit()
             conn.close()
@@ -64,8 +69,10 @@ class ScreenTimeTests(unittest.TestCase):
             events = load_screen_time_events(db_path)
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0].app, "WhatsApp")
-            self.assertEqual(events[0].duration_seconds, 0.0)
+            self.assertEqual(events[0].duration_seconds, 60.0)
             self.assertEqual(events[0].data["bundle_id"], "net.whatsapp.WhatsApp")
+            self.assertEqual(events[0].data["title"], "Family")
+            self.assertEqual(events[0].count, 2)
 
     def test_future_outlier_is_filtered(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

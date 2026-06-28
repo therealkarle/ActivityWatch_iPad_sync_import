@@ -35,6 +35,7 @@ class ScreenTimeEvent:
     end: datetime
     app: str
     data: dict[str, Any] | None = None
+    count: int = 1
 
     @property
     def duration_seconds(self) -> float:
@@ -235,6 +236,95 @@ def _event_data_from_row(row_dict: dict[str, Any]) -> dict[str, Any] | None:
     return data or None
 
 
+def _merge_event_data(
+    base: dict[str, Any] | None,
+    incoming: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if base is None:
+        return dict(incoming) if incoming else None
+    if not incoming:
+        return dict(base)
+
+    merged = dict(base)
+    for key, value in incoming.items():
+        if key not in merged or merged[key] in (None, ""):
+            merged[key] = value
+    return merged or None
+
+
+def _session_key(event: ScreenTimeEvent) -> tuple[str, str | None, str | None]:
+    data = event.data or {}
+    bundle_id = _normalize_text(data.get("bundle_id")) or event.app
+    title = _normalize_text(data.get("title"))
+    domain_identifier = _normalize_text(data.get("domain_identifier"))
+    return bundle_id, title, domain_identifier if title is None else None
+
+
+def consolidate_screen_time_events(
+    events: list[ScreenTimeEvent],
+    *,
+    session_gap_seconds: int = 900,
+    min_duration_seconds: int = 30,
+) -> list[ScreenTimeEvent]:
+    if not events:
+        return []
+
+    ordered = sorted(events, key=lambda event: (event.start, event.end, event.app))
+    sessions: list[dict[str, Any]] = []
+
+    for event in ordered:
+        if not sessions:
+            sessions.append(
+                {
+                    "start": event.start,
+                    "end": event.end,
+                    "app": event.app,
+                    "data": event.data,
+                    "count": event.count,
+                    "key": _session_key(event),
+                }
+            )
+            continue
+
+        current = sessions[-1]
+        same_key = current["key"] == _session_key(event)
+        gap_seconds = (event.start - current["end"]).total_seconds()
+        if same_key and gap_seconds <= session_gap_seconds:
+            current["end"] = max(current["end"], event.end, event.start)
+            current["count"] += event.count
+            current["data"] = _merge_event_data(current["data"], event.data)
+            continue
+
+        sessions.append(
+            {
+                "start": event.start,
+                "end": event.end,
+                "app": event.app,
+                "data": event.data,
+                "count": event.count,
+                "key": _session_key(event),
+            }
+        )
+
+    consolidated: list[ScreenTimeEvent] = []
+    for session in sessions:
+        start = session["start"]
+        end = session["end"]
+        duration_seconds = max(0.0, (end - start).total_seconds())
+        if duration_seconds < min_duration_seconds:
+            end = start + timedelta(seconds=min_duration_seconds)
+        consolidated.append(
+            ScreenTimeEvent(
+                start=start,
+                end=end,
+                app=session["app"],
+                data=session["data"],
+                count=int(session["count"]),
+            )
+        )
+    return consolidated
+
+
 def _debug_print(verbose: bool, message: str) -> None:
     if verbose:
         print(message)
@@ -394,7 +484,7 @@ def load_screen_time_events(
             if cutoff is not None:
                 print(f"Cutoff event end: {cutoff.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')}")
         if "ZOBJECT" in schema:
-            return _load_events_from_zobject(
+            events = _load_events_from_zobject(
                 conn,
                 schema,
                 cutoff,
@@ -402,8 +492,9 @@ def load_screen_time_events(
                 reference_time=reference_time,
                 future_tolerance_days=future_tolerance_days,
             )
+            return consolidate_screen_time_events(events)
         if "ZINTERACTIONS" in schema:
-            return _load_events_from_zinteractions(
+            events = _load_events_from_zinteractions(
                 conn,
                 schema,
                 cutoff,
@@ -411,6 +502,7 @@ def load_screen_time_events(
                 reference_time=reference_time,
                 future_tolerance_days=future_tolerance_days,
             )
+            return consolidate_screen_time_events(events)
         raise ScreenTimeError(
             "No supported tables were found in the SQLite database. "
             "Expected: ZOBJECT or ZINTERACTIONS."

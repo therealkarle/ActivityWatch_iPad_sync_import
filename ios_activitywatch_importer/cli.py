@@ -27,6 +27,9 @@ def main() -> int:
     except ActivityWatchError as exc:
         print(exc)
         return 1
+    except KeyboardInterrupt:
+        print("Aborted while waiting for ActivityWatch.")
+        return 130
 
     print(f"{imported} events imported.")
     return 0
