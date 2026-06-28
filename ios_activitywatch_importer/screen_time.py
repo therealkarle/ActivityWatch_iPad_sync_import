@@ -36,6 +36,11 @@ class ScreenTimeEvent:
     app: str
     data: dict[str, Any] | None = None
     count: int = 1
+    source_table: str | None = None
+    source_pk: int | None = None
+    raw_start: datetime | None = None
+    raw_end: datetime | None = None
+    inferred_duration: bool = False
 
     @property
     def duration_seconds(self) -> float:
@@ -249,15 +254,16 @@ def _merge_event_data(
     for key, value in incoming.items():
         if key not in merged or merged[key] in (None, ""):
             merged[key] = value
+        elif key == "source_pk" and merged[key] != value:
+            existing = str(merged[key])
+            merged[key] = f"{existing},{value}"
     return merged or None
 
 
-def _session_key(event: ScreenTimeEvent) -> tuple[str, str | None, str | None]:
+def _session_key(event: ScreenTimeEvent) -> tuple[str, str]:
     data = event.data or {}
     bundle_id = _normalize_text(data.get("bundle_id")) or event.app
-    title = _normalize_text(data.get("title"))
-    domain_identifier = _normalize_text(data.get("domain_identifier"))
-    return bundle_id, title, domain_identifier if title is None else None
+    return bundle_id, event.app
 
 
 def consolidate_screen_time_events(
@@ -282,6 +288,11 @@ def consolidate_screen_time_events(
                     "data": event.data,
                     "count": event.count,
                     "key": _session_key(event),
+                    "source_table": event.source_table,
+                    "source_pk": event.source_pk,
+                    "raw_start": event.raw_start or event.start,
+                    "raw_end": event.raw_end or event.end,
+                    "inferred_duration": event.inferred_duration,
                 }
             )
             continue
@@ -293,6 +304,8 @@ def consolidate_screen_time_events(
             current["end"] = max(current["end"], event.end, event.start)
             current["count"] += event.count
             current["data"] = _merge_event_data(current["data"], event.data)
+            current["raw_end"] = max(current["raw_end"], event.raw_end or event.end, event.end)
+            current["inferred_duration"] = bool(current["inferred_duration"] or event.inferred_duration)
             continue
 
         sessions.append(
@@ -303,16 +316,25 @@ def consolidate_screen_time_events(
                 "data": event.data,
                 "count": event.count,
                 "key": _session_key(event),
+                "source_table": event.source_table,
+                "source_pk": event.source_pk,
+                "raw_start": event.raw_start or event.start,
+                "raw_end": event.raw_end or event.end,
+                "inferred_duration": event.inferred_duration,
             }
         )
 
     consolidated: list[ScreenTimeEvent] = []
-    for session in sessions:
+    for index, session in enumerate(sessions):
         start = session["start"]
         end = session["end"]
         duration_seconds = max(0.0, (end - start).total_seconds())
         if duration_seconds < min_duration_seconds:
             end = start + timedelta(seconds=min_duration_seconds)
+        if index + 1 < len(sessions):
+            next_start = sessions[index + 1]["start"]
+            if next_start > start and end > next_start:
+                end = next_start
         consolidated.append(
             ScreenTimeEvent(
                 start=start,
@@ -320,6 +342,11 @@ def consolidate_screen_time_events(
                 app=session["app"],
                 data=session["data"],
                 count=int(session["count"]),
+                source_table=session["source_table"],
+                source_pk=session["source_pk"],
+                raw_start=session["raw_start"],
+                raw_end=session["raw_end"],
+                inferred_duration=bool(session["inferred_duration"] or end != session["raw_end"]),
             )
         )
     return consolidated
@@ -360,6 +387,10 @@ def _is_plausible_event_end(
     return end <= reference_time + timedelta(days=future_tolerance_days)
 
 
+def _is_calendar_interaction(row_dict: dict[str, Any]) -> bool:
+    return _normalize_text(row_dict.get("ZBUNDLEID")) == "com.apple.mobilecal"
+
+
 def _load_events_from_zobject(
     conn: sqlite3.Connection,
     schema: dict[str, list[str]],
@@ -388,7 +419,17 @@ def _load_events_from_zobject(
         if not _is_plausible_event_end(end, reference_time, future_tolerance_days):
             continue
         app_name = _extract_app_name_from_row(conn, row, schema)
-        events.append(ScreenTimeEvent(start=start, end=end, app=app_name))
+        events.append(
+            ScreenTimeEvent(
+                start=start,
+                end=end,
+                app=app_name,
+                source_table="ZOBJECT",
+                source_pk=row["Z_PK"] if "Z_PK" in row.keys() else None,
+                raw_start=start,
+                raw_end=end,
+            )
+        )
     return events
 
 
@@ -421,16 +462,27 @@ def _load_events_from_zinteractions(
             continue
         if not _is_plausible_event_end(end, reference_time, future_tolerance_days):
             continue
+        row_dict = {key: row[key] for key in row.keys()}
+        if _is_calendar_interaction(row_dict):
+            continue
         app_name = _extract_app_name_from_row(conn, row, schema)
         if not _is_meaningful_app_name(app_name) and app_name != "unknown":
             continue
-        row_dict = {key: row[key] for key in row.keys()}
+        data = _event_data_from_row(row_dict) or {}
+        data["source"] = "zinteractions"
+        if "Z_PK" in row.keys():
+            data["source_pk"] = row["Z_PK"]
         events.append(
             ScreenTimeEvent(
                 start=start,
                 end=end,
                 app=app_name,
-                data=_event_data_from_row(row_dict),
+                data=data,
+                source_table="ZINTERACTIONS",
+                source_pk=row["Z_PK"] if "Z_PK" in row.keys() else None,
+                raw_start=start,
+                raw_end=end,
+                inferred_duration=end == start,
             )
         )
     return events

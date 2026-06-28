@@ -73,6 +73,127 @@ class ScreenTimeTests(unittest.TestCase):
             self.assertEqual(events[0].data["bundle_id"], "net.whatsapp.WhatsApp")
             self.assertEqual(events[0].data["title"], "Family")
             self.assertEqual(events[0].count, 2)
+            self.assertTrue(events[0].inferred_duration)
+            self.assertEqual(events[0].source_table, "ZINTERACTIONS")
+
+    def test_zero_duration_interactions_are_sessionized_by_app(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "interaction.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE ZINTERACTIONS (
+                    Z_PK INTEGER,
+                    ZBUNDLEID TEXT,
+                    ZGROUPNAME TEXT,
+                    ZSTARTDATE REAL,
+                    ZENDDATE REAL
+                )
+                """
+            )
+            conn.executemany(
+                "INSERT INTO ZINTERACTIONS (Z_PK, ZBUNDLEID, ZGROUPNAME, ZSTARTDATE, ZENDDATE) VALUES (?, ?, ?, ?, ?)",
+                [
+                    (1, "net.whatsapp.WhatsApp", "Family", 10.0, 10.0),
+                    (2, "net.whatsapp.WhatsApp", "Work", 70.0, 70.0),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            events = load_screen_time_events(db_path)
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].app, "WhatsApp")
+            self.assertEqual(events[0].duration_seconds, 60.0)
+            self.assertEqual(events[0].count, 2)
+            self.assertEqual(events[0].data["source"], "zinteractions")
+
+    def test_interaction_sessions_are_clamped_at_next_app(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "interaction.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE ZINTERACTIONS (
+                    ZBUNDLEID TEXT,
+                    ZSTARTDATE REAL,
+                    ZENDDATE REAL
+                )
+                """
+            )
+            conn.executemany(
+                "INSERT INTO ZINTERACTIONS (ZBUNDLEID, ZSTARTDATE, ZENDDATE) VALUES (?, ?, ?)",
+                [
+                    ("net.whatsapp.WhatsApp", 10.0, 10.0),
+                    ("com.google.Gmail", 20.0, 20.0),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            events = load_screen_time_events(db_path)
+
+            self.assertEqual(len(events), 2)
+            self.assertEqual(events[0].app, "WhatsApp")
+            self.assertEqual(events[0].duration_seconds, 10.0)
+            self.assertEqual(events[1].app, "Gmail")
+            self.assertEqual(events[1].duration_seconds, 30.0)
+
+    def test_positive_interaction_interval_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "interaction.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE ZINTERACTIONS (
+                    ZBUNDLEID TEXT,
+                    ZSTARTDATE REAL,
+                    ZENDDATE REAL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO ZINTERACTIONS (ZBUNDLEID, ZSTARTDATE, ZENDDATE) VALUES (?, ?, ?)",
+                ("com.google.Gmail", 10.0, 130.0),
+            )
+            conn.commit()
+            conn.close()
+
+            events = load_screen_time_events(db_path)
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].app, "Gmail")
+            self.assertEqual(events[0].duration_seconds, 120.0)
+            self.assertFalse(events[0].inferred_duration)
+
+    def test_calendar_interactions_are_filtered_from_app_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "interaction.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE ZINTERACTIONS (
+                    ZBUNDLEID TEXT,
+                    ZSTARTDATE REAL,
+                    ZENDDATE REAL
+                )
+                """
+            )
+            conn.executemany(
+                "INSERT INTO ZINTERACTIONS (ZBUNDLEID, ZSTARTDATE, ZENDDATE) VALUES (?, ?, ?)",
+                [
+                    ("com.apple.mobilecal", 10.0, 86410.0),
+                    ("net.whatsapp.WhatsApp", 20.0, 20.0),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            events = load_screen_time_events(db_path)
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].app, "WhatsApp")
 
     def test_future_outlier_is_filtered(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

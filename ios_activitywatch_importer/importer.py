@@ -45,6 +45,11 @@ def _write_debug_csv(events, root_dir: Path) -> Path:
     debug_dir.mkdir(parents=True, exist_ok=True)
     csv_path = _debug_csv_path(root_dir)
     fieldnames = [
+        "source_table",
+        "source_pk",
+        "raw_start_utc",
+        "raw_end_utc",
+        "inferred_duration",
         "start_utc",
         "end_utc",
         "duration_seconds",
@@ -62,10 +67,16 @@ def _write_debug_csv(events, root_dir: Path) -> Path:
         writer.writeheader()
         for event in events:
             data = event.data or {}
+            source_pk = data.get("source_pk", getattr(event, "source_pk", ""))
             writer.writerow(
                 {
                     "start_utc": _format_dt(event.start),
                     "end_utc": _format_dt(event.end),
+                    "source_table": getattr(event, "source_table", "") or "",
+                    "source_pk": source_pk or "",
+                    "raw_start_utc": _format_dt(getattr(event, "raw_start", None)),
+                    "raw_end_utc": _format_dt(getattr(event, "raw_end", None)),
+                    "inferred_duration": str(bool(getattr(event, "inferred_duration", False))).lower(),
                     "duration_seconds": f"{event.duration_seconds:.6f}",
                     "count": getattr(event, "count", 1),
                     "app": event.app,
@@ -111,7 +122,7 @@ def run_import(config: AppConfig, *, verbose: bool = False) -> int:
         print("Checking/creating ActivityWatch bucket ...")
     client.ensure_bucket(
         config.bucket_id,
-        bucket_type="currentapp",
+        bucket_type="currentwindow",
         hostname=config.hostname,
     )
     last_end = client.get_last_event_end(config.bucket_id)
@@ -158,10 +169,12 @@ def run_import(config: AppConfig, *, verbose: bool = False) -> int:
                     "The ActivityWatch cutoff is newer than the data in the backup, "
                     "so every matching row was filtered out."
                 )
+        print(f"Bucket {config.bucket_id}: 0 events written.")
         return 0
 
     payloads = [_event_payload(event) for event in events]
     imported = client.post_events(config.bucket_id, payloads)
     if verbose:
         print(f"Posted to ActivityWatch: {imported}")
+    print(f"Bucket {config.bucket_id}: {imported} events written.")
     return imported
