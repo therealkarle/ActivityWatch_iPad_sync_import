@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import glob
+import os
 import plistlib
 import tempfile
 from pathlib import Path
 
 from iphone_backup_decrypt import EncryptedBackup
+from iphone_backup_decrypt import google_iphone_dataprotection, utils
 
 from .config import KNOWLEDGE_DB_SHA1
 
@@ -45,30 +47,89 @@ def _direct_knowledge_db_matches(backup_base_dir: Path) -> list[Path]:
     return [Path(match) for match in matches if Path(match).is_file()]
 
 
+def _screen_time_related_files(backup: EncryptedBackup) -> list[tuple[str, str | None]]:
+    with backup.manifest_db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT relativePath, domain
+            FROM Files
+            WHERE lower(relativePath) LIKE lower(?)
+               OR lower(relativePath) LIKE lower(?)
+               OR lower(relativePath) LIKE lower(?)
+            ORDER BY relativePath
+            """,
+            ("%knowledgec.db%", "%screentime%", "%interactionc.db%"),
+        )
+        rows = cursor.fetchall()
+    return [(str(row[0]), str(row[1]) if row[1] is not None else None) for row in rows]
+
+
+def _format_related_files(rows: list[tuple[str, str | None]]) -> str:
+    return ", ".join(
+        f"{relative_path}" + (f" ({domain})" if domain else "")
+        for relative_path, domain in rows
+    )
+
+
+def _decrypt_file_without_size_check(backup: EncryptedBackup, relative_path: str, domain: str | None) -> bytes:
+    file_id, file_bplist = backup._file_metadata_from_manifest(relative_path, domain)
+    backup._read_and_unlock_keybag()
+    file_plist = utils.FilePlist(file_bplist)
+    if file_plist.encryption_key is None:
+        raise ValueError("Path is not an encrypted file.")
+
+    inner_key = backup._keybag.unwrapKeyForClass(file_plist.protection_class, file_plist.encryption_key)
+    filename_in_backup = os.path.join(backup._backup_directory, file_id[:2], file_id)
+    with open(filename_in_backup, "rb") as encrypted_file_filehandle:
+        encrypted_data = encrypted_file_filehandle.read()
+
+    decrypted_data = google_iphone_dataprotection.AESdecryptCBC(encrypted_data, inner_key)
+    return google_iphone_dataprotection.removePadding(decrypted_data)
+
+
 def _decrypt_knowledge_db(backup_dir: Path, backup_password: str) -> Path:
     backup = EncryptedBackup(backup_directory=str(backup_dir), passphrase=backup_password)
     try:
         with backup.manifest_db_cursor() as cursor:
             cursor.execute(
                 """
-                SELECT relativePath, domain
+                SELECT fileID, relativePath, domain
                 FROM Files
-                WHERE fileID = ?
-                ORDER BY flags DESC, domain, relativePath
+                WHERE lower(relativePath) LIKE lower(?)
+                   OR lower(relativePath) LIKE lower(?)
+                ORDER BY
+                    CASE
+                        WHEN lower(relativePath) LIKE lower(?) THEN 0
+                        ELSE 1
+                    END,
+                    flags DESC,
+                    domain,
+                    relativePath
                 LIMIT 1
                 """,
-                (KNOWLEDGE_DB_SHA1,),
+                ("%knowledgeC.db", "%interactionC.db", "%knowledgeC.db"),
             )
             row = cursor.fetchone()
+            related_rows = _screen_time_related_files(backup)
 
         if not row:
+            related_suffix = ""
+            if related_rows:
+                related_suffix = (
+                    f" Gefundene Screen-Time-Dateien: {_format_related_files(related_rows)}."
+                )
             raise BackupNotFoundError(
-                f"knowledgeC.db nicht im entschlüsselten Backup-Manifest gefunden: {backup_dir}"
+                f"knowledgeC.db nicht im entschlüsselten Backup-Manifest gefunden: {backup_dir}."
+                f"{related_suffix}"
             )
 
-        relative_path = str(row[0])
-        domain = str(row[1]) if row[1] is not None else None
-        file_bytes = backup.extract_file_as_bytes(relative_path=relative_path, domain_like=domain)
+        _file_id = str(row[0])
+        relative_path = str(row[1])
+        domain = str(row[2]) if row[2] is not None else None
+        try:
+            file_bytes = backup.extract_file_as_bytes(relative_path=relative_path, domain_like=domain)
+        except AssertionError:
+            file_bytes = _decrypt_file_without_size_check(backup, relative_path, domain)
 
         temp_file = tempfile.NamedTemporaryFile(prefix="knowledgeC-", suffix=".db", delete=False)
         try:
@@ -82,13 +143,6 @@ def _decrypt_knowledge_db(backup_dir: Path, backup_password: str) -> Path:
             "Verschlüsseltes Backup konnte nicht entschlüsselt werden. "
             "Prüfe das backup_password in config.json."
         ) from exc
-    finally:
-        cleanup = getattr(backup, "_cleanup", None)
-        if callable(cleanup):
-            try:
-                cleanup()
-            except Exception:
-                pass
 
 
 def find_knowledge_db(backup_base_dir: Path, backup_password: str | None = None) -> Path:

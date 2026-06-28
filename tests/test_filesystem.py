@@ -49,7 +49,10 @@ class FilesystemTests(unittest.TestCase):
                     return self
 
                 def fetchone(self):
-                    return ("Documents/knowledgeC.db", "HomeDomain")
+                    return ("dummy-file-id", "Documents/knowledgeC.db", "HomeDomain")
+
+                def fetchall(self):
+                    return []
 
             class DummyBackup:
                 def __init__(self, *, backup_directory, passphrase):
@@ -79,3 +82,107 @@ class FilesystemTests(unittest.TestCase):
 
             self.assertTrue(found.exists())
             self.assertEqual(found.read_bytes(), b"sqlite-bytes")
+
+    def test_encrypted_backup_without_knowledge_db_reports_related_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup_dir = root / "00008030-001C195E3E42002E"
+            backup_dir.mkdir(parents=True)
+            (backup_dir / "Manifest.db").write_text("stub", encoding="utf-8")
+            with (backup_dir / "Manifest.plist").open("wb") as manifest_file:
+                plistlib.dump({"IsEncrypted": True}, manifest_file)
+
+            class DummyCursor:
+                def __init__(self) -> None:
+                    self.params: tuple[str, ...] | None = None
+
+                def execute(self, _query, params=None):
+                    self.params = tuple(params) if params is not None else None
+                    return self
+
+                def fetchone(self):
+                    if self.params == ("%knowledgeC.db%",):
+                        return None
+                    return None
+
+                def fetchall(self):
+                    return [
+                        ("Library/Preferences/com.apple.ScreenTimeAgent.plist", "HomeDomain"),
+                        ("Library/CoreDuet/People/interactionC.db", "HomeDomain"),
+                    ]
+
+            class DummyBackup:
+                def __init__(self, *, backup_directory, passphrase):
+                    self.backup_directory = backup_directory
+                    self.passphrase = passphrase
+
+                def manifest_db_cursor(self):
+                    class _Context:
+                        def __enter__(self_inner):
+                            return DummyCursor()
+
+                        def __exit__(self_inner, exc_type, exc, tb):
+                            return False
+
+                    return _Context()
+
+                def extract_file_as_bytes(self, *, relative_path, domain_like=None):
+                    raise AssertionError("extract_file_as_bytes should not be called")
+
+            with patch("ios_activitywatch_importer.filesystem.EncryptedBackup", DummyBackup):
+                with self.assertRaises(Exception) as ctx:
+                    find_knowledge_db(root, "secret")
+
+            message = str(ctx.exception)
+            self.assertIn("knowledgeC.db nicht im entschlüsselten Backup-Manifest gefunden", message)
+            self.assertIn("ScreenTimeAgent.plist", message)
+            self.assertIn("interactionC.db", message)
+
+    def test_encrypted_backup_uses_interaction_db_as_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup_dir = root / "00008030-001C195E3E42002E"
+            backup_dir.mkdir(parents=True)
+            (backup_dir / "Manifest.db").write_text("stub", encoding="utf-8")
+            with (backup_dir / "Manifest.plist").open("wb") as manifest_file:
+                plistlib.dump({"IsEncrypted": True}, manifest_file)
+
+            class DummyCursor:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def execute(self, *_args, **_kwargs):
+                    self.calls += 1
+                    return self
+
+                def fetchone(self):
+                    return ("dummy-file-id", "Library/CoreDuet/People/interactionC.db", "HomeDomain")
+
+                def fetchall(self):
+                    return []
+
+            class DummyBackup:
+                def __init__(self, *, backup_directory, passphrase):
+                    self.backup_directory = backup_directory
+                    self.passphrase = passphrase
+
+                def manifest_db_cursor(self):
+                    class _Context:
+                        def __enter__(self_inner):
+                            return DummyCursor()
+
+                        def __exit__(self_inner, exc_type, exc, tb):
+                            return False
+
+                    return _Context()
+
+                def extract_file_as_bytes(self, *, relative_path, domain_like=None):
+                    self.relative_path = relative_path
+                    self.domain_like = domain_like
+                    return b"interaction-sqlite-bytes"
+
+            with patch("ios_activitywatch_importer.filesystem.EncryptedBackup", DummyBackup):
+                found = find_knowledge_db(root, "secret")
+
+            self.assertTrue(found.exists())
+            self.assertEqual(found.read_bytes(), b"interaction-sqlite-bytes")

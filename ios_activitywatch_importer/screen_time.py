@@ -177,6 +177,58 @@ def _extract_app_name_from_row(
     return "unknown"
 
 
+def _load_events_from_zobject(
+    conn: sqlite3.Connection,
+    schema: dict[str, list[str]],
+    cutoff: datetime | None,
+) -> list[ScreenTimeEvent]:
+    query = 'SELECT * FROM "ZOBJECT" WHERE ZSTREAMNAME = ? AND ZSTARTDATE IS NOT NULL AND ZENDDATE IS NOT NULL'
+    params: list[Any] = ["/app/inFocus"]
+    if cutoff is not None:
+        cutoff_core = cutoff.timestamp() - APPLE_SCREEN_TIME_EPOCH
+        query += " AND ZENDDATE > ?"
+        params.append(cutoff_core)
+    query += " ORDER BY ZSTARTDATE ASC"
+
+    events: list[ScreenTimeEvent] = []
+    rows = conn.execute(query, params).fetchall()
+    for row in rows:
+        start = coredata_to_datetime(row["ZSTARTDATE"])
+        end = coredata_to_datetime(row["ZENDDATE"])
+        if start is None or end is None or end <= start:
+            continue
+        app_name = _extract_app_name_from_row(conn, row, schema)
+        events.append(ScreenTimeEvent(start=start, end=end, app=app_name))
+    return events
+
+
+def _load_events_from_zinteractions(
+    conn: sqlite3.Connection,
+    schema: dict[str, list[str]],
+    cutoff: datetime | None,
+) -> list[ScreenTimeEvent]:
+    query = 'SELECT * FROM "ZINTERACTIONS" WHERE ZSTARTDATE IS NOT NULL AND ZENDDATE IS NOT NULL'
+    params: list[Any] = []
+    if cutoff is not None:
+        cutoff_core = cutoff.timestamp() - APPLE_SCREEN_TIME_EPOCH
+        query += " AND ZENDDATE > ?"
+        params.append(cutoff_core)
+    query += " ORDER BY ZSTARTDATE ASC"
+
+    events: list[ScreenTimeEvent] = []
+    rows = conn.execute(query, params).fetchall()
+    for row in rows:
+        start = coredata_to_datetime(row["ZSTARTDATE"])
+        end = coredata_to_datetime(row["ZENDDATE"])
+        if start is None or end is None or end <= start:
+            continue
+        app_name = _extract_app_name_from_row(conn, row, schema)
+        if not _is_meaningful_app_name(app_name):
+            continue
+        events.append(ScreenTimeEvent(start=start, end=end, app=app_name))
+    return events
+
+
 def load_screen_time_events(db_path: Path, cutoff: datetime | None = None) -> list[ScreenTimeEvent]:
     if not db_path.exists():
         raise ScreenTimeError(f"SQLite-Datei nicht gefunden: {db_path}")
@@ -194,27 +246,14 @@ def load_screen_time_events(db_path: Path, cutoff: datetime | None = None) -> li
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-        if "ZOBJECT" not in schema:
-            raise ScreenTimeError("Tabelle ZOBJECT wurde in der SQLite-Datenbank nicht gefunden.")
-
-        query = 'SELECT * FROM "ZOBJECT" WHERE ZSTREAMNAME = ? AND ZSTARTDATE IS NOT NULL AND ZENDDATE IS NOT NULL'
-        params: list[Any] = ["/app/inFocus"]
-        if cutoff is not None:
-            cutoff_core = cutoff.timestamp() - APPLE_SCREEN_TIME_EPOCH
-            query += " AND ZENDDATE > ?"
-            params.append(cutoff_core)
-        query += " ORDER BY ZSTARTDATE ASC"
-
-        events: list[ScreenTimeEvent] = []
-        rows = conn.execute(query, params).fetchall()
-        for row in rows:
-            start = coredata_to_datetime(row["ZSTARTDATE"])
-            end = coredata_to_datetime(row["ZENDDATE"])
-            if start is None or end is None or end <= start:
-                continue
-            app_name = _extract_app_name_from_row(conn, row, schema)
-            events.append(ScreenTimeEvent(start=start, end=end, app=app_name))
-        return events
+        if "ZOBJECT" in schema:
+            return _load_events_from_zobject(conn, schema, cutoff)
+        if "ZINTERACTIONS" in schema:
+            return _load_events_from_zinteractions(conn, schema, cutoff)
+        raise ScreenTimeError(
+            "Unterstützte Tabellen wurden in der SQLite-Datenbank nicht gefunden. "
+            "Erwartet: ZOBJECT oder ZINTERACTIONS."
+        )
     except sqlite3.DatabaseError as exc:
         raise ScreenTimeError(
             "SQLite-Datenbank konnte nicht gelesen werden. "

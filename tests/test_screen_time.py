@@ -41,3 +41,27 @@ class ScreenTimeTests(unittest.TestCase):
             self.assertEqual(events[0].app, "Safari")
             self.assertEqual(events[0].duration_seconds, 10.0)
 
+    def test_extraction_from_interaction_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "interaction.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE ZINTERACTIONS (
+                    ZBUNDLEID TEXT,
+                    ZSTARTDATE REAL,
+                    ZENDDATE REAL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO ZINTERACTIONS (ZBUNDLEID, ZSTARTDATE, ZENDDATE) VALUES (?, ?, ?)",
+                ("com.apple.mobilecal", 30.0, 45.0),
+            )
+            conn.commit()
+            conn.close()
+
+            events = load_screen_time_events(db_path)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].app, "com.apple.mobilecal")
+            self.assertEqual(events[0].duration_seconds, 15.0)
