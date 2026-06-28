@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +14,27 @@ class ScreenTimeError(RuntimeError):
     pass
 
 
+_BUNDLE_ID_TO_APP_NAME = {
+    "com.apple.DocumentsApp": "Files",
+    "com.apple.ScreenshotServicesService": "Screenshot Services",
+    "com.apple.mobilecal": "Calendar",
+    "com.apple.mobilemail": "Mail",
+    "com.apple.mobileslideshow": "Photos",
+    "com.burbn.instagram": "Instagram",
+    "com.garmin.connect.mobile": "Garmin Connect",
+    "com.google.Gmail": "Gmail",
+    "com.microsoft.skydrive": "OneDrive",
+    "net.whatsapp.WhatsApp": "WhatsApp",
+    "org.mozilla.ios.Firefox": "Firefox",
+}
+
+
 @dataclass(frozen=True)
 class ScreenTimeEvent:
     start: datetime
     end: datetime
     app: str
+    data: dict[str, Any] | None = None
 
     @property
     def duration_seconds(self) -> float:
@@ -68,6 +84,15 @@ def _is_meaningful_app_name(text: str) -> bool:
     if "/" in text and "app/infocus" in lowered:
         return False
     return any(char.isalpha() for char in text)
+
+
+def _humanize_bundle_id(bundle_id: str) -> str:
+    if bundle_id in _BUNDLE_ID_TO_APP_NAME:
+        return _BUNDLE_ID_TO_APP_NAME[bundle_id]
+
+    tail = bundle_id.rsplit(".", maxsplit=1)[-1]
+    tail = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", tail).strip()
+    return tail or bundle_id
 
 
 def _extract_name_from_text(values: list[str]) -> str | None:
@@ -137,6 +162,7 @@ def _extract_app_name_from_row(
         "ZAPPLICATIONNAME",
         "ZBUNDLEIDENTIFIER",
         "ZBUNDLEID",
+        "ZTARGETBUNDLEID",
         "ZDISPLAYNAME",
         "ZNAME",
         "ZVALUESTRING",
@@ -146,6 +172,8 @@ def _extract_app_name_from_row(
     for column in direct_priority:
         if column in row_dict:
             text = _normalize_text(row_dict[column])
+            if text and column in {"ZBUNDLEIDENTIFIER", "ZBUNDLEID", "ZTARGETBUNDLEID"}:
+                return _humanize_bundle_id(text)
             if text and _is_meaningful_app_name(text):
                 return text
             if text:
@@ -177,10 +205,79 @@ def _extract_app_name_from_row(
     return "unknown"
 
 
+def _event_data_from_row(row_dict: dict[str, Any]) -> dict[str, Any] | None:
+    data: dict[str, Any] = {}
+
+    bundle_id = _normalize_text(row_dict.get("ZBUNDLEID"))
+    if bundle_id:
+        data["bundle_id"] = bundle_id
+
+    target_bundle_id = _normalize_text(row_dict.get("ZTARGETBUNDLEID"))
+    if target_bundle_id:
+        data["target_bundle_id"] = target_bundle_id
+
+    group_name = _normalize_text(row_dict.get("ZGROUPNAME"))
+    if group_name:
+        data["title"] = group_name
+
+    domain_identifier = _normalize_text(row_dict.get("ZDOMAINIDENTIFIER"))
+    if domain_identifier:
+        data["domain_identifier"] = domain_identifier
+
+    sender = _normalize_text(row_dict.get("ZSENDER"))
+    if sender:
+        data["sender"] = sender
+
+    account = _normalize_text(row_dict.get("ZACCOUNT"))
+    if account:
+        data["account"] = account
+
+    return data or None
+
+
+def _debug_print(verbose: bool, message: str) -> None:
+    if verbose:
+        print(message)
+
+
+def _table_row_count(conn: sqlite3.Connection, table_name: str) -> int:
+    row = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def _table_date_range(
+    conn: sqlite3.Connection,
+    table_name: str,
+    start_column: str,
+    end_column: str,
+) -> tuple[datetime | None, datetime | None]:
+    row = conn.execute(
+        f'SELECT MIN({start_column}), MAX({end_column}) FROM "{table_name}"'
+    ).fetchone()
+    if not row:
+        return None, None
+    start_raw, end_raw = row
+    return coredata_to_datetime(start_raw), coredata_to_datetime(end_raw)
+
+
+def _is_plausible_event_end(
+    end: datetime,
+    reference_time: datetime | None,
+    future_tolerance_days: int,
+) -> bool:
+    if reference_time is None:
+        return True
+    return end <= reference_time + timedelta(days=future_tolerance_days)
+
+
 def _load_events_from_zobject(
     conn: sqlite3.Connection,
     schema: dict[str, list[str]],
     cutoff: datetime | None,
+    *,
+    verbose: bool = False,
+    reference_time: datetime | None = None,
+    future_tolerance_days: int = 30,
 ) -> list[ScreenTimeEvent]:
     query = 'SELECT * FROM "ZOBJECT" WHERE ZSTREAMNAME = ? AND ZSTARTDATE IS NOT NULL AND ZENDDATE IS NOT NULL'
     params: list[Any] = ["/app/inFocus"]
@@ -192,10 +289,13 @@ def _load_events_from_zobject(
 
     events: list[ScreenTimeEvent] = []
     rows = conn.execute(query, params).fetchall()
+    _debug_print(verbose, f"ZOBJECT candidate rows after cutoff: {len(rows)}")
     for row in rows:
         start = coredata_to_datetime(row["ZSTARTDATE"])
         end = coredata_to_datetime(row["ZENDDATE"])
         if start is None or end is None or end <= start:
+            continue
+        if not _is_plausible_event_end(end, reference_time, future_tolerance_days):
             continue
         app_name = _extract_app_name_from_row(conn, row, schema)
         events.append(ScreenTimeEvent(start=start, end=end, app=app_name))
@@ -206,6 +306,10 @@ def _load_events_from_zinteractions(
     conn: sqlite3.Connection,
     schema: dict[str, list[str]],
     cutoff: datetime | None,
+    *,
+    verbose: bool = False,
+    reference_time: datetime | None = None,
+    future_tolerance_days: int = 30,
 ) -> list[ScreenTimeEvent]:
     query = 'SELECT * FROM "ZINTERACTIONS" WHERE ZSTARTDATE IS NOT NULL AND ZENDDATE IS NOT NULL'
     params: list[Any] = []
@@ -217,19 +321,39 @@ def _load_events_from_zinteractions(
 
     events: list[ScreenTimeEvent] = []
     rows = conn.execute(query, params).fetchall()
+    _debug_print(verbose, f"ZINTERACTIONS candidate rows after cutoff: {len(rows)}")
     for row in rows:
         start = coredata_to_datetime(row["ZSTARTDATE"])
         end = coredata_to_datetime(row["ZENDDATE"])
-        if start is None or end is None or end <= start:
+        if start is None or end is None:
+            continue
+        if end < start:
+            continue
+        if not _is_plausible_event_end(end, reference_time, future_tolerance_days):
             continue
         app_name = _extract_app_name_from_row(conn, row, schema)
-        if not _is_meaningful_app_name(app_name):
+        if not _is_meaningful_app_name(app_name) and app_name != "unknown":
             continue
-        events.append(ScreenTimeEvent(start=start, end=end, app=app_name))
+        row_dict = {key: row[key] for key in row.keys()}
+        events.append(
+            ScreenTimeEvent(
+                start=start,
+                end=end,
+                app=app_name,
+                data=_event_data_from_row(row_dict),
+            )
+        )
     return events
 
 
-def load_screen_time_events(db_path: Path, cutoff: datetime | None = None) -> list[ScreenTimeEvent]:
+def load_screen_time_events(
+    db_path: Path,
+    cutoff: datetime | None = None,
+    *,
+    verbose: bool = False,
+    reference_time: datetime | None = None,
+    future_tolerance_days: int = 30,
+) -> list[ScreenTimeEvent]:
     if not db_path.exists():
         raise ScreenTimeError(f"SQLite file not found: {db_path}")
 
@@ -246,10 +370,47 @@ def load_screen_time_events(db_path: Path, cutoff: datetime | None = None) -> li
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
+        if verbose:
+            table_names = ", ".join(sorted(schema)) or "(none)"
+            print(f"SQLite tables: {table_names}")
+            for table_name in sorted(schema):
+                print(f"  {table_name}: { _table_row_count(conn, table_name) } rows")
+            if "ZOBJECT" in schema:
+                start_dt, end_dt = _table_date_range(conn, "ZOBJECT", "ZSTARTDATE", "ZENDDATE")
+                if start_dt or end_dt:
+                    print(
+                        "  ZOBJECT date range: "
+                        f"{start_dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z') if start_dt else 'unknown'} -> "
+                        f"{end_dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z') if end_dt else 'unknown'}"
+                    )
+            if "ZINTERACTIONS" in schema:
+                start_dt, end_dt = _table_date_range(conn, "ZINTERACTIONS", "ZSTARTDATE", "ZENDDATE")
+                if start_dt or end_dt:
+                    print(
+                        "  ZINTERACTIONS date range: "
+                        f"{start_dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z') if start_dt else 'unknown'} -> "
+                        f"{end_dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z') if end_dt else 'unknown'}"
+                    )
+            if cutoff is not None:
+                print(f"Cutoff event end: {cutoff.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')}")
         if "ZOBJECT" in schema:
-            return _load_events_from_zobject(conn, schema, cutoff)
+            return _load_events_from_zobject(
+                conn,
+                schema,
+                cutoff,
+                verbose=verbose,
+                reference_time=reference_time,
+                future_tolerance_days=future_tolerance_days,
+            )
         if "ZINTERACTIONS" in schema:
-            return _load_events_from_zinteractions(conn, schema, cutoff)
+            return _load_events_from_zinteractions(
+                conn,
+                schema,
+                cutoff,
+                verbose=verbose,
+                reference_time=reference_time,
+                future_tolerance_days=future_tolerance_days,
+            )
         raise ScreenTimeError(
             "No supported tables were found in the SQLite database. "
             "Expected: ZOBJECT or ZINTERACTIONS."

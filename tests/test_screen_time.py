@@ -56,12 +56,45 @@ class ScreenTimeTests(unittest.TestCase):
             )
             conn.execute(
                 "INSERT INTO ZINTERACTIONS (ZBUNDLEID, ZSTARTDATE, ZENDDATE) VALUES (?, ?, ?)",
-                ("com.apple.mobilecal", 30.0, 45.0),
+                ("net.whatsapp.WhatsApp", 30.0, 30.0),
             )
             conn.commit()
             conn.close()
 
             events = load_screen_time_events(db_path)
             self.assertEqual(len(events), 1)
-            self.assertEqual(events[0].app, "com.apple.mobilecal")
-            self.assertEqual(events[0].duration_seconds, 15.0)
+            self.assertEqual(events[0].app, "WhatsApp")
+            self.assertEqual(events[0].duration_seconds, 0.0)
+            self.assertEqual(events[0].data["bundle_id"], "net.whatsapp.WhatsApp")
+
+    def test_future_outlier_is_filtered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "interaction.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE ZINTERACTIONS (
+                    ZBUNDLEID TEXT,
+                    ZSTARTDATE REAL,
+                    ZENDDATE REAL
+                )
+                """
+            )
+            conn.executemany(
+                "INSERT INTO ZINTERACTIONS (ZBUNDLEID, ZSTARTDATE, ZENDDATE) VALUES (?, ?, ?)",
+                [
+                    ("net.whatsapp.WhatsApp", 100.0, 100.0),
+                    ("com.apple.mobilecal", 923003999.0, 923003999.0),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            reference_time = datetime(2026, 6, 28, tzinfo=timezone.utc)
+            events = load_screen_time_events(
+                db_path,
+                reference_time=reference_time,
+                future_tolerance_days=30,
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].app, "WhatsApp")
