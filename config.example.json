@@ -1,0 +1,5 @@
+{
+  "backup_base_dir": "C:\\Users\\<USERNAME>\\AppData\\Roaming\\Apple Computer\\MobileSync\\Backup\\",
+  "aw_api_url": "http://localhost:5600/api/0",
+  "bucket_id": "aw-watcher-ios"
+}

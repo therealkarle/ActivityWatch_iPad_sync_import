@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ios-activitywatch-importer"
+version = "0.1.0"
+description = "Import iOS Screen Time data from an unencrypted iTunes backup into ActivityWatch."
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = ["ios_activitywatch_importer"]
