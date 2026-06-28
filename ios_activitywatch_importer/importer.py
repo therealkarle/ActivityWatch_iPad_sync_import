@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .activitywatch_client import ActivityWatchClient
-from .config import AppConfig
+from .config import AppConfig, project_root
 from .filesystem import find_knowledge_db
 from .screen_time import load_screen_time_events
 
@@ -23,16 +24,30 @@ def _format_dt(value: datetime | None) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _write_debug_copy(db_path: Path, root_dir: Path) -> Path:
+    debug_dir = root_dir / "debugOut"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    debug_copy_path = debug_dir / "knowledgeC.decrypted.db"
+    shutil.copy2(db_path, debug_copy_path)
+    return debug_copy_path
+
+
 def run_import(config: AppConfig, *, verbose: bool = False) -> int:
     if verbose:
         print(f"Backup folder: {config.backup_base_dir}")
         print(f"ActivityWatch: {config.aw_api_url}")
         print(f"Bucket: {config.bucket_id}")
+        print(f"Debug mode: {'on' if config.debug_mode else 'off'}")
 
     db_path = find_knowledge_db(Path(config.backup_base_dir), config.backup_password)
     if verbose:
         source_label = "knowledgeC.db" if db_path.name.lower().startswith("knowledgec") else db_path.name
         print(f"Using file: {db_path} ({source_label})")
+
+    if config.debug_mode:
+        debug_copy_path = _write_debug_copy(db_path, project_root())
+        if verbose:
+            print(f"Debug copy written: {debug_copy_path}")
 
     client = ActivityWatchClient(config.aw_api_url)
     if verbose:

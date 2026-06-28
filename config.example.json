@@ -3,5 +3,6 @@
   "backup_password": "",
   "aw_api_url": "http://localhost:5600/api/0",
   "bucket_id": "aw-watcher-ios",
-  "hostname": "my-iphone"
+  "hostname": "my-iphone",
+  "debug_mode": false
 }

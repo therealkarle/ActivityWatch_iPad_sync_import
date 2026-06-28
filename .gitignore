@@ -1,4 +1,5 @@
 config.json
+debugOut/
 .venv/
 venv/
 env/

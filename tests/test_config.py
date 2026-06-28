@@ -43,6 +43,7 @@ class ConfigTests(unittest.TestCase):
                         "aw_api_url": "http://localhost:5600/api/0",
                         "bucket_id": "aw-watcher-ios",
                         "hostname": "test-iphone",
+                        "debug_mode": True,
                     }
                 ),
                 encoding="utf-8",
@@ -52,6 +53,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(cfg.aw_api_url, "http://localhost:5600/api/0")
             self.assertEqual(cfg.hostname, "test-iphone")
             self.assertIsNone(cfg.backup_password)
+            self.assertTrue(cfg.debug_mode)
 
     def test_loads_backup_password(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

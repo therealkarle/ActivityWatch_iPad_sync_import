@@ -14,6 +14,7 @@ DEFAULT_CONFIG_EXAMPLE = {
     "aw_api_url": "http://localhost:5600/api/0",
     "bucket_id": "aw-watcher-ios",
     "hostname": "my-iphone",
+    "debug_mode": False,
 }
 
 
@@ -28,6 +29,7 @@ class AppConfig:
     aw_api_url: str
     bucket_id: str
     hostname: str
+    debug_mode: bool
 
 
 def project_root() -> Path:
@@ -71,6 +73,10 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         if key not in raw or not str(raw[key]).strip():
             raise ConfigError(f"config.json does not contain a valid value for '{key}'.")
 
+    debug_mode_raw = raw.get("debug_mode", False)
+    if not isinstance(debug_mode_raw, bool):
+        raise ConfigError("config.json does not contain a valid value for 'debug_mode'.")
+
     backup_base_dir = Path(
         os.path.expandvars(os.path.expanduser(str(raw["backup_base_dir"])))
     )
@@ -81,4 +87,5 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         aw_api_url=str(raw["aw_api_url"]).rstrip("/"),
         bucket_id=str(raw["bucket_id"]).strip(),
         hostname=str(raw["hostname"]).strip(),
+        debug_mode=debug_mode_raw,
     )
