@@ -39,6 +39,7 @@ class ConfigTests(unittest.TestCase):
                 json.dumps(
                     {
                         "backup_base_dir": "C:\\Users\\Test\\AppData\\Roaming\\Apple Computer\\MobileSync\\Backup\\",
+                        "backup_password": "",
                         "aw_api_url": "http://localhost:5600/api/0",
                         "bucket_id": "aw-watcher-ios",
                         "hostname": "test-iphone",
@@ -50,3 +51,23 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(cfg.bucket_id, "aw-watcher-ios")
             self.assertEqual(cfg.aw_api_url, "http://localhost:5600/api/0")
             self.assertEqual(cfg.hostname, "test-iphone")
+            self.assertIsNone(cfg.backup_password)
+
+    def test_loads_backup_password(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file = config_path(root)
+            config_file.write_text(
+                json.dumps(
+                    {
+                        "backup_base_dir": "C:\\Users\\Test\\AppData\\Roaming\\Apple Computer\\MobileSync\\Backup\\",
+                        "backup_password": "secret",
+                        "aw_api_url": "http://localhost:5600/api/0",
+                        "bucket_id": "aw-watcher-ios",
+                        "hostname": "test-iphone",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cfg = load_config(root)
+            self.assertEqual(cfg.backup_password, "secret")

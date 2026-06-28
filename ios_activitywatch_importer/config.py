@@ -10,6 +10,7 @@ APPLE_SCREEN_TIME_EPOCH = 978307200
 KNOWLEDGE_DB_SHA1 = "4f108665e5a33b7330c9b0ed930162ef7b756290"
 DEFAULT_CONFIG_EXAMPLE = {
     "backup_base_dir": "C:\\Users\\<USERNAME>\\AppData\\Roaming\\Apple Computer\\MobileSync\\Backup\\",
+    "backup_password": "",
     "aw_api_url": "http://localhost:5600/api/0",
     "bucket_id": "aw-watcher-ios",
     "hostname": "my-iphone",
@@ -23,6 +24,7 @@ class ConfigError(RuntimeError):
 @dataclass(frozen=True)
 class AppConfig:
     backup_base_dir: Path
+    backup_password: str | None
     aw_api_url: str
     bucket_id: str
     hostname: str
@@ -72,8 +74,10 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
     backup_base_dir = Path(
         os.path.expandvars(os.path.expanduser(str(raw["backup_base_dir"])))
     )
+    backup_password = str(raw.get("backup_password", "")).strip() or None
     return AppConfig(
         backup_base_dir=backup_base_dir,
+        backup_password=backup_password,
         aw_api_url=str(raw["aw_api_url"]).rstrip("/"),
         bucket_id=str(raw["bucket_id"]).strip(),
         hostname=str(raw["hostname"]).strip(),

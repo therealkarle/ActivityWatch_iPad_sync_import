@@ -18,7 +18,7 @@ def _event_payload(event) -> dict:
 
 
 def run_import(config: AppConfig) -> int:
-    db_path = find_knowledge_db(Path(config.backup_base_dir))
+    db_path = find_knowledge_db(Path(config.backup_base_dir), config.backup_password)
     client = ActivityWatchClient(config.aw_api_url)
     client.ensure_bucket(
         config.bucket_id,
