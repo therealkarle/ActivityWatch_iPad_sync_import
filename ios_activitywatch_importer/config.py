@@ -12,6 +12,7 @@ DEFAULT_CONFIG_EXAMPLE = {
     "backup_base_dir": "C:\\Users\\<USERNAME>\\AppData\\Roaming\\Apple Computer\\MobileSync\\Backup\\",
     "aw_api_url": "http://localhost:5600/api/0",
     "bucket_id": "aw-watcher-ios",
+    "hostname": "my-iphone",
 }
 
 
@@ -24,6 +25,7 @@ class AppConfig:
     backup_base_dir: Path
     aw_api_url: str
     bucket_id: str
+    hostname: str
 
 
 def project_root() -> Path:
@@ -63,7 +65,7 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
     except json.JSONDecodeError as exc:
         raise ConfigError(f"config.json ist kein gültiges JSON: {exc}") from exc
 
-    for key in ("backup_base_dir", "aw_api_url", "bucket_id"):
+    for key in ("backup_base_dir", "aw_api_url", "bucket_id", "hostname"):
         if key not in raw or not str(raw[key]).strip():
             raise ConfigError(f"config.json enthält keinen gültigen Wert für '{key}'.")
 
@@ -74,4 +76,5 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         backup_base_dir=backup_base_dir,
         aw_api_url=str(raw["aw_api_url"]).rstrip("/"),
         bucket_id=str(raw["bucket_id"]).strip(),
+        hostname=str(raw["hostname"]).strip(),
     )

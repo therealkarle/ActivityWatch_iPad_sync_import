@@ -20,7 +20,11 @@ def _event_payload(event) -> dict:
 def run_import(config: AppConfig) -> int:
     db_path = find_knowledge_db(Path(config.backup_base_dir))
     client = ActivityWatchClient(config.aw_api_url)
-    client.ensure_bucket(config.bucket_id, bucket_type="currentapp")
+    client.ensure_bucket(
+        config.bucket_id,
+        bucket_type="currentapp",
+        hostname=config.hostname,
+    )
     last_end = client.get_last_event_end(config.bucket_id)
     events = load_screen_time_events(db_path, cutoff=last_end)
     if not events:

@@ -41,6 +41,7 @@ class ConfigTests(unittest.TestCase):
                         "backup_base_dir": "C:\\Users\\Test\\AppData\\Roaming\\Apple Computer\\MobileSync\\Backup\\",
                         "aw_api_url": "http://localhost:5600/api/0",
                         "bucket_id": "aw-watcher-ios",
+                        "hostname": "test-iphone",
                     }
                 ),
                 encoding="utf-8",
@@ -48,4 +49,4 @@ class ConfigTests(unittest.TestCase):
             cfg = load_config(root)
             self.assertEqual(cfg.bucket_id, "aw-watcher-ios")
             self.assertEqual(cfg.aw_api_url, "http://localhost:5600/api/0")
-
+            self.assertEqual(cfg.hostname, "test-iphone")

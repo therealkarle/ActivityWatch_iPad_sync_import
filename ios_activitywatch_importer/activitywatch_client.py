@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -59,7 +58,12 @@ class ActivityWatchClient:
         except URLError as exc:
             raise ActivityWatchError(f"ActivityWatch nicht erreichbar: {exc.reason}") from exc
 
-    def ensure_bucket(self, bucket_id: str, bucket_type: str = "currentapp") -> None:
+    def ensure_bucket(
+        self,
+        bucket_id: str,
+        bucket_type: str = "currentapp",
+        hostname: str = "unknown",
+    ) -> None:
         status, _ = self._request("GET", f"/buckets/{bucket_id}")
         if status == 200:
             return
@@ -68,7 +72,7 @@ class ActivityWatchClient:
 
         payload = {
             "client": "ios-screen-time-importer",
-            "hostname": socket.gethostname(),
+            "hostname": hostname,
             "type": bucket_type,
         }
         status, _ = self._request("POST", f"/buckets/{bucket_id}", payload)

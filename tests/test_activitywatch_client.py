@@ -75,7 +75,7 @@ class ActivityWatchClientTests(unittest.TestCase):
 
     def test_bucket_and_events(self) -> None:
         client = ActivityWatchClient(self.base_url)
-        client.ensure_bucket("aw-watcher-ios")
+        client.ensure_bucket("aw-watcher-ios", hostname="test-iphone")
         last = client.get_last_event_end("aw-watcher-ios")
         self.assertIsNotNone(last)
         count = client.post_events(
