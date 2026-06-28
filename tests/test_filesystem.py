@@ -32,8 +32,8 @@ class FilesystemTests(unittest.TestCase):
 
             with self.assertRaises(Exception) as ctx:
                 find_knowledge_db(root)
-            self.assertIn("verschlüsselt", str(ctx.exception))
-            self.assertIn("backup_password", str(ctx.exception))
+            self.assertIn("encrypted", str(ctx.exception))
+            self.assertIn("backup password", str(ctx.exception))
 
     def test_encrypted_backup_uses_password_and_writes_temp_copy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,7 +134,7 @@ class FilesystemTests(unittest.TestCase):
                     find_knowledge_db(root, "secret")
 
             message = str(ctx.exception)
-            self.assertIn("knowledgeC.db nicht im entschlüsselten Backup-Manifest gefunden", message)
+            self.assertIn("knowledgeC.db not found in decrypted backup manifest", message)
             self.assertIn("ScreenTimeAgent.plist", message)
             self.assertIn("interactionC.db", message)
 

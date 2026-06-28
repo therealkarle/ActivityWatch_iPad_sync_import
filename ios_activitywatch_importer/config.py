@@ -59,17 +59,17 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
 
     if not cfg_path.exists():
         raise ConfigError(
-            f"config.json fehlt. Bitte {example_path.name} ausfüllen und als config.json speichern."
+            f"config.json is missing. Fill out {example_path.name} and save it as config.json."
         )
 
     try:
         raw = json.loads(cfg_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise ConfigError(f"config.json ist kein gültiges JSON: {exc}") from exc
+        raise ConfigError(f"config.json is not valid JSON: {exc}") from exc
 
     for key in ("backup_base_dir", "aw_api_url", "bucket_id", "hostname"):
         if key not in raw or not str(raw[key]).strip():
-            raise ConfigError(f"config.json enthält keinen gültigen Wert für '{key}'.")
+            raise ConfigError(f"config.json does not contain a valid value for '{key}'.")
 
     backup_base_dir = Path(
         os.path.expandvars(os.path.expanduser(str(raw["backup_base_dir"])))

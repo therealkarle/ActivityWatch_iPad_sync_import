@@ -29,7 +29,7 @@ class ConfigTests(unittest.TestCase):
             ensure_config_example(root)
             with self.assertRaises(Exception) as ctx:
                 load_config(root)
-            self.assertIn("config.json fehlt", str(ctx.exception))
+            self.assertIn("config.json is missing", str(ctx.exception))
 
     def test_loads_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

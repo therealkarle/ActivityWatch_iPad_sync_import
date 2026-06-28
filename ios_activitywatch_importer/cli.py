@@ -14,7 +14,7 @@ def main() -> int:
 
     try:
         config = load_config(project_root())
-        imported = run_import(config)
+        imported = run_import(config, verbose=True)
     except ConfigError as exc:
         print(exc)
         return 1
@@ -28,7 +28,7 @@ def main() -> int:
         print(exc)
         return 1
 
-    print(f"{imported} Events importiert.")
+    print(f"{imported} events imported.")
     return 0
 
 

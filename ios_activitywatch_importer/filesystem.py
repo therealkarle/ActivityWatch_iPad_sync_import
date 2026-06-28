@@ -116,10 +116,10 @@ def _decrypt_knowledge_db(backup_dir: Path, backup_password: str) -> Path:
             related_suffix = ""
             if related_rows:
                 related_suffix = (
-                    f" Gefundene Screen-Time-Dateien: {_format_related_files(related_rows)}."
+                    f" Found Screen Time files: {_format_related_files(related_rows)}."
                 )
             raise BackupNotFoundError(
-                f"knowledgeC.db nicht im entschlüsselten Backup-Manifest gefunden: {backup_dir}."
+                f"knowledgeC.db not found in decrypted backup manifest: {backup_dir}."
                 f"{related_suffix}"
             )
 
@@ -140,14 +140,14 @@ def _decrypt_knowledge_db(backup_dir: Path, backup_password: str) -> Path:
         return Path(temp_file.name)
     except ValueError as exc:
         raise BackupNotFoundError(
-            "Verschlüsseltes Backup konnte nicht entschlüsselt werden. "
-            "Prüfe das backup_password in config.json."
+            "Encrypted backup could not be decrypted. "
+            "Check the backup_password in config.json."
         ) from exc
 
 
 def find_knowledge_db(backup_base_dir: Path, backup_password: str | None = None) -> Path:
     if not backup_base_dir.exists():
-        raise BackupNotFoundError(f"backup_base_dir existiert nicht: {backup_base_dir}")
+        raise BackupNotFoundError(f"backup_base_dir does not exist: {backup_base_dir}")
 
     files = sorted(_direct_knowledge_db_matches(backup_base_dir), key=lambda path: path.stat().st_mtime, reverse=True)
     if files:
@@ -156,18 +156,18 @@ def find_knowledge_db(backup_base_dir: Path, backup_password: str | None = None)
     backup_dirs = _backup_directories(backup_base_dir)
     if not backup_dirs:
         raise BackupNotFoundError(
-            f"knowledgeC.db nicht gefunden unter: {backup_base_dir}"
+            f"knowledgeC.db not found under: {backup_base_dir}"
         )
 
     encrypted_backups = [backup_dir for backup_dir in backup_dirs if _is_encrypted_backup(backup_dir)]
     if encrypted_backups:
         if not backup_password:
             raise BackupNotFoundError(
-                "Das gefundene iTunes-Backup ist verschlüsselt. "
-                "Trage den Backup-Schlüssel als backup_password in config.json ein."
+                "The found iTunes backup is encrypted. "
+                "Set the backup password in config.json."
             )
         return _decrypt_knowledge_db(encrypted_backups[0], backup_password)
 
     raise BackupNotFoundError(
-        f"knowledgeC.db nicht gefunden unter: {backup_base_dir}"
+        f"knowledgeC.db not found under: {backup_base_dir}"
     )

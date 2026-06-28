@@ -56,7 +56,7 @@ class ActivityWatchClient:
             finally:
                 exc.close()
         except URLError as exc:
-            raise ActivityWatchError(f"ActivityWatch nicht erreichbar: {exc.reason}") from exc
+            raise ActivityWatchError(f"ActivityWatch is not reachable: {exc.reason}") from exc
 
     def ensure_bucket(
         self,
@@ -68,7 +68,7 @@ class ActivityWatchClient:
         if status == 200:
             return
         if status != 404:
-            raise ActivityWatchError(f"Bucket-Prüfung fehlgeschlagen (HTTP {status}).")
+            raise ActivityWatchError(f"Bucket check failed (HTTP {status}).")
 
         payload = {
             "client": "ios-screen-time-importer",
@@ -77,14 +77,14 @@ class ActivityWatchClient:
         }
         status, _ = self._request("POST", f"/buckets/{bucket_id}", payload)
         if status not in (200, 201, 204, 304):
-            raise ActivityWatchError(f"Bucket-Erstellung fehlgeschlagen (HTTP {status}).")
+            raise ActivityWatchError(f"Bucket creation failed (HTTP {status}).")
 
     def get_last_event_end(self, bucket_id: str) -> datetime | None:
         status, body = self._request("GET", f"/buckets/{bucket_id}/events")
         if status == 404:
             return None
         if status != 200:
-            raise ActivityWatchError(f"Events-Abfrage fehlgeschlagen (HTTP {status}).")
+            raise ActivityWatchError(f"Event query failed (HTTP {status}).")
         if not isinstance(body, list) or not body:
             return None
 
@@ -110,7 +110,7 @@ class ActivityWatchClient:
         status, body = self._request("POST", f"/buckets/{bucket_id}/events", event)
         if status not in (200, 201, 204):
             raise ActivityWatchError(
-                f"Event-Import fehlgeschlagen (HTTP {status}): {body if body is not None else ''}".strip()
+                f"Event import failed (HTTP {status}): {body if body is not None else ''}".strip()
             )
 
     def post_events(self, bucket_id: str, events: list[dict[str, Any]]) -> int:

@@ -231,12 +231,12 @@ def _load_events_from_zinteractions(
 
 def load_screen_time_events(db_path: Path, cutoff: datetime | None = None) -> list[ScreenTimeEvent]:
     if not db_path.exists():
-        raise ScreenTimeError(f"SQLite-Datei nicht gefunden: {db_path}")
+        raise ScreenTimeError(f"SQLite file not found: {db_path}")
 
     try:
         conn = sqlite3.connect(db_path.resolve().as_uri(), uri=True)
     except sqlite3.Error as exc:
-        raise ScreenTimeError(f"SQLite-Datenbank kann nicht geöffnet werden: {exc}") from exc
+        raise ScreenTimeError(f"SQLite database could not be opened: {exc}") from exc
 
     conn.row_factory = sqlite3.Row
     try:
@@ -251,13 +251,13 @@ def load_screen_time_events(db_path: Path, cutoff: datetime | None = None) -> li
         if "ZINTERACTIONS" in schema:
             return _load_events_from_zinteractions(conn, schema, cutoff)
         raise ScreenTimeError(
-            "Unterstützte Tabellen wurden in der SQLite-Datenbank nicht gefunden. "
-            "Erwartet: ZOBJECT oder ZINTERACTIONS."
+            "No supported tables were found in the SQLite database. "
+            "Expected: ZOBJECT or ZINTERACTIONS."
         )
     except sqlite3.DatabaseError as exc:
         raise ScreenTimeError(
-            "SQLite-Datenbank konnte nicht gelesen werden. "
-            "Sie kann gesperrt, beschädigt oder verschlüsselt sein."
+            "SQLite database could not be read. "
+            "It may be locked, damaged, or encrypted."
         ) from exc
     finally:
         conn.close()
