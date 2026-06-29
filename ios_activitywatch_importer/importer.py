@@ -116,7 +116,7 @@ def run_import(config: AppConfig, *, verbose: bool = False) -> int:
         print("Checking/creating ActivityWatch bucket ...")
     client.ensure_bucket(
         config.bucket_id,
-        bucket_type="currentwindow",
+        bucket_type="currentapp",
         hostname=config.hostname,
     )
     last_end = client.get_last_event_end(config.bucket_id)
