@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import glob
+import csv
 import os
 import plistlib
 import tempfile
@@ -31,6 +32,7 @@ class UsageDataFiles:
     knowledge_db: Path | None = None
     interaction_db: Path | None = None
     safari_history_db: Path | None = None
+    app_activity_manifest_csv: Path | None = None
     screen_time_agent_plist: Path | None = None
     screen_time_settings_plist: Path | None = None
 
@@ -226,6 +228,58 @@ def _extract_backup_file(
     return Path(temp_file.name)
 
 
+def _write_app_activity_manifest_csv(backup: EncryptedBackup) -> Path | None:
+    _require_iphone_backup_decrypt()
+    rows: list[tuple[str, str, int, int]] = []
+    with backup.manifest_db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT relativePath, domain, file
+            FROM Files
+            WHERE file IS NOT NULL
+              AND (
+                domain LIKE 'AppDomain-%'
+                OR domain LIKE 'AppDomainGroup-group.%'
+              )
+              AND domain NOT LIKE 'AppDomainPlugin-%'
+            """
+        )
+        manifest_rows = cursor.fetchall()
+
+    for relative_path, domain, file_blob in manifest_rows:
+        if file_blob is None or domain is None:
+            continue
+        try:
+            file_plist = utils.FilePlist(file_blob)
+        except Exception:
+            continue
+        mtime = getattr(file_plist, "mtime", None)
+        filesize = getattr(file_plist, "filesize", 0) or 0
+        if not isinstance(mtime, int) or mtime <= 0 or filesize <= 0:
+            continue
+        rows.append((str(domain), str(relative_path or ""), mtime, int(filesize)))
+
+    if not rows:
+        return None
+
+    temp_file = tempfile.NamedTemporaryFile(prefix="ios-aw-app-activity-", suffix=".csv", delete=False, mode="w", encoding="utf-8", newline="")
+    try:
+        writer = csv.DictWriter(temp_file, fieldnames=["domain", "relative_path", "mtime", "size"])
+        writer.writeheader()
+        for domain, relative_path, mtime, size in rows:
+            writer.writerow(
+                {
+                    "domain": domain,
+                    "relative_path": relative_path,
+                    "mtime": mtime,
+                    "size": size,
+                }
+            )
+    finally:
+        temp_file.close()
+    return Path(temp_file.name)
+
+
 def _manifest_match(
     backup: EncryptedBackup,
     *,
@@ -299,6 +353,7 @@ def _decrypt_usage_data_files(backup_dir: Path, backup_password: str) -> UsageDa
         knowledge_db=found.get("knowledge_db"),
         interaction_db=found.get("interaction_db"),
         safari_history_db=found.get("safari_history_db"),
+        app_activity_manifest_csv=_write_app_activity_manifest_csv(backup),
         screen_time_agent_plist=found.get("screen_time_agent_plist"),
         screen_time_settings_plist=found.get("screen_time_settings_plist"),
     )

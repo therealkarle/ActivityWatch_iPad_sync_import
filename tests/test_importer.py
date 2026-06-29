@@ -53,7 +53,7 @@ class ImporterTests(unittest.TestCase):
 
             self.assertEqual(csv_path, root / "debugOut" / "aw-watcher-window.recognized-events.csv")
             content = csv_path.read_text(encoding="utf-8")
-            self.assertIn("source_table,source_pk,raw_start_utc,raw_end_utc,inferred_duration,start_utc,end_utc,duration_seconds,count,app,bundle_id,target_bundle_id,title,domain_identifier,sender,account,url,content_url,derived_intent_identifier,direction,mechanism,is_response,recipient_count", content)
+            self.assertIn("source_table,source_pk,raw_start_utc,raw_end_utc,inferred_duration,start_utc,end_utc,duration_seconds,count,app,bundle_id,target_bundle_id,title,domain_identifier,sender,account,url,content_url,derived_intent_identifier,source,domain,source_path,file_size,direction,mechanism,is_response,recipient_count", content)
             self.assertIn("ZINTERACTIONS,1", content)
             self.assertIn("true", content)
             self.assertIn("WhatsApp", content)
@@ -82,6 +82,7 @@ class ImporterTests(unittest.TestCase):
 
             fake_client = Mock()
             fake_client.ensure_bucket.return_value = None
+            fake_client.get_events.return_value = []
             fake_client.get_last_event_end.return_value = None
             fake_client.post_events.return_value = len(events)
             fake_load = Mock(return_value=events)
@@ -107,7 +108,7 @@ class ImporterTests(unittest.TestCase):
             self.assertIn("Bucket aw-watcher-window: 1 events written.", output)
             self.assertIn("Bucket aw-watcher-afk: 0 events written.", output)
 
-    def test_run_import_passes_activitywatch_cutoff_to_loader(self) -> None:
+    def test_run_import_ignores_activitywatch_cutoff_for_backfill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = AppConfig(
@@ -131,6 +132,7 @@ class ImporterTests(unittest.TestCase):
 
             fake_client = Mock()
             fake_client.ensure_bucket.return_value = None
+            fake_client.get_events.return_value = []
             fake_client.get_last_event_end.return_value = last_end
             fake_client.post_events.return_value = len(events)
             fake_load = Mock(return_value=events)
@@ -149,4 +151,4 @@ class ImporterTests(unittest.TestCase):
 
             self.assertEqual(imported, 1)
             _, kwargs = fake_load.call_args
-            self.assertEqual(kwargs["cutoff"], last_end)
+            self.assertIsNone(kwargs["cutoff"])

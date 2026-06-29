@@ -89,18 +89,12 @@ class ActivityWatchClient:
         raise ActivityWatchError(f"Bucket creation failed (HTTP {status}){detail}")
 
     def get_last_event_end(self, bucket_id: str) -> datetime | None:
-        status, body = self._request("GET", f"/buckets/{bucket_id}/events")
-        if status == 404:
-            return None
-        if status != 200:
-            raise ActivityWatchError(f"Event query failed (HTTP {status}).")
-        if not isinstance(body, list) or not body:
+        body = self.get_events(bucket_id)
+        if not body:
             return None
 
         latest_end: datetime | None = None
         for event in body:
-            if not isinstance(event, dict):
-                continue
             timestamp = event.get("timestamp")
             if not isinstance(timestamp, str):
                 continue
@@ -114,6 +108,20 @@ class ActivityWatchClient:
             if latest_end is None or end > latest_end:
                 latest_end = end
         return latest_end
+
+    def get_events(self, bucket_id: str) -> list[dict[str, Any]]:
+        status, body = self._request("GET", f"/buckets/{bucket_id}/events")
+        if status == 404:
+            return []
+        if status != 200:
+            raise ActivityWatchError(f"Event query failed (HTTP {status}).")
+        if not isinstance(body, list) or not body:
+            return []
+        events: list[dict[str, Any]] = []
+        for event in body:
+            if isinstance(event, dict):
+                events.append(event)
+        return events
 
     def post_event(self, bucket_id: str, event: dict[str, Any]) -> None:
         status, body = self._request("POST", f"/buckets/{bucket_id}/events", event)

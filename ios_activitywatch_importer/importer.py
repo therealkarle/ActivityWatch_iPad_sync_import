@@ -11,6 +11,61 @@ from .filesystem import UsageDataFiles, find_usage_data_files
 from .screen_time import AfkEvent, ScreenTimeEvent, derive_afk_events, load_window_events_from_files
 
 
+def _parse_aw_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _event_fingerprint(event: dict) -> tuple[int, int, str, str, str] | None:
+    start = _parse_aw_timestamp(event.get("timestamp"))
+    if start is None:
+        return None
+    try:
+        duration_ms = int(round(float(event.get("duration", 0) or 0) * 1000))
+    except (TypeError, ValueError):
+        duration_ms = 0
+    start_ms = int(start.timestamp() * 1000)
+    data = event.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    return (
+        start_ms,
+        duration_ms,
+        str(data.get("app", "")),
+        str(data.get("bundle_id", "")),
+        str(data.get("source", "")),
+    )
+
+
+def _existing_event_fingerprints(events: list[dict]) -> set[tuple[int, int, str, str, str]]:
+    fingerprints: set[tuple[int, int, str, str, str]] = set()
+    for event in events:
+        fingerprint = _event_fingerprint(event)
+        if fingerprint is not None:
+            fingerprints.add(fingerprint)
+    return fingerprints
+
+
+def _filter_new_payloads(
+    payloads: list[dict],
+    existing_fingerprints: set[tuple[int, int, str, str, str]],
+) -> list[dict]:
+    new_payloads: list[dict] = []
+    seen = set(existing_fingerprints)
+    for payload in payloads:
+        fingerprint = _event_fingerprint(payload)
+        if fingerprint is not None and fingerprint in seen:
+            continue
+        if fingerprint is not None:
+            seen.add(fingerprint)
+        new_payloads.append(payload)
+    return new_payloads
+
+
 def _window_event_payload(event: ScreenTimeEvent) -> dict:
     data = {"app": event.app, "title": event.app}
     if getattr(event, "data", None):
@@ -55,6 +110,7 @@ def _write_usage_debug_copies(files: UsageDataFiles, root_dir: Path) -> list[Pat
         (files.knowledge_db, "knowledgeC.decrypted.db"),
         (files.interaction_db, "interactionC.decrypted.db"),
         (files.safari_history_db, "Safari-History.decrypted.db"),
+        (files.app_activity_manifest_csv, "app-domain-activity-manifest.csv"),
         (files.screen_time_agent_plist, "ScreenTimeAgent.plist"),
         (files.screen_time_settings_plist, "ScreenTimeSettingsAgent.plist"),
     ]
@@ -98,6 +154,10 @@ def _write_debug_csv(events, root_dir: Path) -> Path:
         "url",
         "content_url",
         "derived_intent_identifier",
+        "source",
+        "domain",
+        "source_path",
+        "file_size",
         "direction",
         "mechanism",
         "is_response",
@@ -130,6 +190,10 @@ def _write_debug_csv(events, root_dir: Path) -> Path:
                     "url": data.get("url", ""),
                     "content_url": data.get("content_url", ""),
                     "derived_intent_identifier": data.get("derived_intent_identifier", ""),
+                    "source": data.get("source", ""),
+                    "domain": data.get("domain", ""),
+                    "source_path": data.get("source_path", ""),
+                    "file_size": data.get("file_size", ""),
                     "direction": data.get("direction", ""),
                     "mechanism": data.get("mechanism", ""),
                     "is_response": data.get("is_response", ""),
@@ -186,6 +250,8 @@ def run_import(config: AppConfig, *, verbose: bool = False) -> int:
             print(f"Interaction DB: {usage_files.interaction_db}")
         if usage_files.safari_history_db:
             print(f"Safari History DB: {usage_files.safari_history_db}")
+        if usage_files.app_activity_manifest_csv:
+            print(f"App activity manifest CSV: {usage_files.app_activity_manifest_csv}")
 
     if config.debug_mode:
         debug_copy_paths = _write_usage_debug_copies(usage_files, project_root())
@@ -209,6 +275,8 @@ def run_import(config: AppConfig, *, verbose: bool = False) -> int:
         bucket_type="afkstatus",
         hostname=config.hostname,
     )
+    existing_window_events = client.get_events(config.window_bucket_id)
+    existing_afk_events = client.get_events(config.afk_bucket_id)
     last_end = client.get_last_event_end(config.window_bucket_id)
     afk_last_end = client.get_last_event_end(config.afk_bucket_id)
     effective_cutoff = last_end
@@ -224,22 +292,17 @@ def run_import(config: AppConfig, *, verbose: bool = False) -> int:
         print(f"Last AFK event in bucket: {_format_dt(afk_last_end)}")
         print("Loading usage events from backup ...")
 
-    load_cutoff = None if afk_last_end is None else effective_cutoff
     source_events = load_window_events_from_files(
         _usage_db_paths(usage_files),
         safari_history_db_path=usage_files.safari_history_db,
-        cutoff=load_cutoff,
+        app_activity_manifest_csv_path=usage_files.app_activity_manifest_csv,
+        cutoff=None,
         verbose=config.debug_mode,
         reference_time=reference_time,
         future_tolerance_days=future_tolerance_days,
     )
-    all_events = [
-        event for event in source_events
-        if effective_cutoff is None or event.end > effective_cutoff
-    ]
+    all_events = source_events
     all_afk_events = derive_afk_events(source_events)
-    if afk_last_end is not None:
-        all_afk_events = [event for event in all_afk_events if event.end > afk_last_end]
     if config.debug_mode:
         csv_path = _write_debug_csv(all_events, project_root())
         afk_csv_path = _write_afk_debug_csv(all_afk_events, project_root())
@@ -268,9 +331,15 @@ def run_import(config: AppConfig, *, verbose: bool = False) -> int:
                 )
         return 0
 
-    window_payloads = [_window_event_payload(event) for event in events]
+    window_payloads = _filter_new_payloads(
+        [_window_event_payload(event) for event in events],
+        _existing_event_fingerprints(existing_window_events),
+    )
     imported = client.post_events(config.window_bucket_id, window_payloads) if window_payloads else 0
-    afk_payloads = [_afk_event_payload(event) for event in all_afk_events]
+    afk_payloads = _filter_new_payloads(
+        [_afk_event_payload(event) for event in all_afk_events],
+        _existing_event_fingerprints(existing_afk_events),
+    )
     afk_imported = client.post_events(config.afk_bucket_id, afk_payloads) if afk_payloads else 0
     if verbose:
         print(f"Posted window events to ActivityWatch: {imported}")

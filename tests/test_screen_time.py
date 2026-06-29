@@ -7,7 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ios_activitywatch_importer.config import APPLE_SCREEN_TIME_EPOCH
-from ios_activitywatch_importer.screen_time import coredata_to_datetime, load_screen_time_events
+from ios_activitywatch_importer.screen_time import (
+    coredata_to_datetime,
+    load_manifest_app_activity_events,
+    load_screen_time_events,
+)
 
 
 class ScreenTimeTests(unittest.TestCase):
@@ -226,3 +230,28 @@ class ScreenTimeTests(unittest.TestCase):
             )
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0].app, "WhatsApp")
+
+    def test_manifest_app_activity_events_are_sessionized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "app-activity.csv"
+            csv_path.write_text(
+                "\n".join(
+                    [
+                        "domain,relative_path,mtime,size",
+                        "AppDomain-com.zhiliaoapp.musically,Library/tracker.sqlite,1782671702,1024",
+                        "AppDomain-com.zhiliaoapp.musically,Library/cache.db,1782671762,2048",
+                        "AppDomain-com.amazon.aiv.AIVApp,Library/cache.db,1782675362,2048",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            events = load_manifest_app_activity_events(csv_path)
+
+            self.assertEqual(len(events), 2)
+            self.assertEqual(events[0].app, "TikTok")
+            self.assertEqual(events[0].duration_seconds, 90.0)
+            self.assertEqual(events[0].count, 2)
+            self.assertEqual(events[0].data["bundle_id"], "com.zhiliaoapp.musically")
+            self.assertEqual(events[0].data["source"], "app_manifest_mtime")
+            self.assertEqual(events[1].app, "Prime Video")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import csv
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,9 @@ _BUNDLE_ID_TO_APP_NAME = {
     "com.burbn.instagram": "Instagram",
     "com.garmin.connect.mobile": "Garmin Connect",
     "com.google.Gmail": "Gmail",
+    "com.amazon.aiv.AIVApp": "Prime Video",
+    "com.videobrowser.ios": "Video Lite",
+    "com.zhiliaoapp.musically": "TikTok",
     "com.microsoft.skydrive": "OneDrive",
     "net.whatsapp.WhatsApp": "WhatsApp",
     "org.mozilla.ios.Firefox": "Firefox",
@@ -111,6 +115,16 @@ def _humanize_bundle_id(bundle_id: str) -> str:
     tail = bundle_id.rsplit(".", maxsplit=1)[-1]
     tail = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", tail).strip()
     return tail or bundle_id
+
+
+def _bundle_id_from_app_domain(domain: str) -> str | None:
+    for prefix in ("AppDomainGroup-", "AppDomain-"):
+        if domain.startswith(prefix):
+            bundle_id = domain[len(prefix):]
+            if bundle_id.startswith("group."):
+                bundle_id = bundle_id[len("group."):]
+            return bundle_id or None
+    return None
 
 
 def _extract_name_from_text(values: list[str]) -> str | None:
@@ -685,10 +699,66 @@ def load_safari_history_events(
         conn.close()
 
 
+def load_manifest_app_activity_events(
+    csv_path: Path,
+    cutoff: datetime | None = None,
+    *,
+    reference_time: datetime | None = None,
+    future_tolerance_days: int = 30,
+) -> list[ScreenTimeEvent]:
+    if not csv_path.exists():
+        return []
+
+    events: list[ScreenTimeEvent] = []
+    try:
+        with csv_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                bundle_id = _bundle_id_from_app_domain(row.get("domain", ""))
+                if not bundle_id:
+                    continue
+                try:
+                    modified = datetime.fromtimestamp(float(row.get("mtime", 0)), tz=timezone.utc)
+                except (TypeError, ValueError, OSError):
+                    continue
+                if cutoff is not None and modified <= cutoff:
+                    continue
+                end = modified + timedelta(seconds=30)
+                if not _is_plausible_event_end(end, reference_time, future_tolerance_days):
+                    continue
+                app_name = _humanize_bundle_id(bundle_id)
+                data: dict[str, Any] = {
+                    "bundle_id": bundle_id,
+                    "source": "app_manifest_mtime",
+                    "domain": row.get("domain", ""),
+                    "source_path": row.get("relative_path", ""),
+                }
+                try:
+                    data["file_size"] = int(row.get("size", 0))
+                except (TypeError, ValueError):
+                    pass
+                events.append(
+                    ScreenTimeEvent(
+                        start=modified,
+                        end=end,
+                        app=app_name,
+                        data=data,
+                        source_table="Manifest.Files",
+                        raw_start=modified,
+                        raw_end=modified,
+                        inferred_duration=True,
+                    )
+                )
+    except OSError:
+        return []
+    return consolidate_screen_time_events(events)
+
+
 def load_window_events_from_files(
     db_paths: list[Path],
     *,
     safari_history_db_path: Path | None = None,
+    app_activity_manifest_csv_path: Path | None = None,
     cutoff: datetime | None = None,
     verbose: bool = False,
     reference_time: datetime | None = None,
@@ -715,6 +785,16 @@ def load_window_events_from_files(
         events.extend(
             load_safari_history_events(
                 safari_history_db_path,
+                cutoff=cutoff,
+                reference_time=reference_time,
+                future_tolerance_days=future_tolerance_days,
+            )
+        )
+
+    if app_activity_manifest_csv_path is not None:
+        events.extend(
+            load_manifest_app_activity_events(
+                app_activity_manifest_csv_path,
                 cutoff=cutoff,
                 reference_time=reference_time,
                 future_tolerance_days=future_tolerance_days,
