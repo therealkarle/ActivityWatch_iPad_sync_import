@@ -6,14 +6,30 @@ import plistlib
 import tempfile
 from pathlib import Path
 
-from iphone_backup_decrypt import EncryptedBackup
-from iphone_backup_decrypt import google_iphone_dataprotection, utils
+try:
+    from iphone_backup_decrypt import EncryptedBackup
+    from iphone_backup_decrypt import google_iphone_dataprotection, utils
+except ModuleNotFoundError as exc:
+    EncryptedBackup = object  # type: ignore[assignment]
+    google_iphone_dataprotection = None  # type: ignore[assignment]
+    utils = None  # type: ignore[assignment]
+    _IPHONE_BACKUP_DECRYPT_IMPORT_ERROR = exc
+else:
+    _IPHONE_BACKUP_DECRYPT_IMPORT_ERROR = None
 
 from .config import KNOWLEDGE_DB_SHA1
 
 
 class BackupNotFoundError(RuntimeError):
     pass
+
+
+def _require_iphone_backup_decrypt() -> None:
+    if _IPHONE_BACKUP_DECRYPT_IMPORT_ERROR is not None:
+        raise BackupNotFoundError(
+            "Missing dependency: iphone-backup-decrypt. "
+            "Install project dependencies or run `pip install iphone-backup-decrypt`."
+        ) from _IPHONE_BACKUP_DECRYPT_IMPORT_ERROR
 
 
 def _backup_directories(backup_base_dir: Path) -> list[Path]:
@@ -48,6 +64,7 @@ def _direct_knowledge_db_matches(backup_base_dir: Path) -> list[Path]:
 
 
 def _screen_time_related_files(backup: EncryptedBackup) -> list[tuple[str, str | None]]:
+    _require_iphone_backup_decrypt()
     with backup.manifest_db_cursor() as cursor:
         cursor.execute(
             """
@@ -72,6 +89,7 @@ def _format_related_files(rows: list[tuple[str, str | None]]) -> str:
 
 
 def _decrypt_file_without_size_check(backup: EncryptedBackup, relative_path: str, domain: str | None) -> bytes:
+    _require_iphone_backup_decrypt()
     file_id, file_bplist = backup._file_metadata_from_manifest(relative_path, domain)
     backup._read_and_unlock_keybag()
     file_plist = utils.FilePlist(file_bplist)
@@ -88,6 +106,7 @@ def _decrypt_file_without_size_check(backup: EncryptedBackup, relative_path: str
 
 
 def _decrypt_knowledge_db(backup_dir: Path, backup_password: str) -> Path:
+    _require_iphone_backup_decrypt()
     backup = EncryptedBackup(backup_directory=str(backup_dir), passphrase=backup_password)
     try:
         with backup.manifest_db_cursor() as cursor:
