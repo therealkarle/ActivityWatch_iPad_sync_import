@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from ios_activitywatch_importer.config import AppConfig
+from ios_activitywatch_importer.filesystem import UsageDataFiles
 from ios_activitywatch_importer.importer import _write_debug_copy
 from ios_activitywatch_importer.importer import run_import
 from ios_activitywatch_importer.screen_time import ScreenTimeEvent
@@ -50,9 +51,9 @@ class ImporterTests(unittest.TestCase):
 
             csv_path = _write_debug_csv(events, root)
 
-            self.assertEqual(csv_path, root / "debugOut" / "knowledgeC.recognized-events.csv")
+            self.assertEqual(csv_path, root / "debugOut" / "aw-watcher-window.recognized-events.csv")
             content = csv_path.read_text(encoding="utf-8")
-            self.assertIn("source_table,source_pk,raw_start_utc,raw_end_utc,inferred_duration,start_utc,end_utc,duration_seconds,count,app,bundle_id,target_bundle_id,title,domain_identifier,sender,account", content)
+            self.assertIn("source_table,source_pk,raw_start_utc,raw_end_utc,inferred_duration,start_utc,end_utc,duration_seconds,count,app,bundle_id,target_bundle_id,title,domain_identifier,sender,account,url,content_url,derived_intent_identifier,direction,mechanism,is_response,recipient_count", content)
             self.assertIn("ZINTERACTIONS,1", content)
             self.assertIn("true", content)
             self.assertIn("WhatsApp", content)
@@ -84,11 +85,13 @@ class ImporterTests(unittest.TestCase):
             fake_client.get_last_event_end.return_value = None
             fake_client.post_events.return_value = len(events)
             fake_load = Mock(return_value=events)
+            fake_usage_files = UsageDataFiles(primary_db=fake_db, interaction_db=fake_db)
 
             with (
-                patch("ios_activitywatch_importer.importer.find_knowledge_db", return_value=fake_db),
+                patch("ios_activitywatch_importer.importer.find_usage_data_files", return_value=fake_usage_files),
                 patch("ios_activitywatch_importer.importer.ActivityWatchClient", return_value=fake_client),
-                patch("ios_activitywatch_importer.importer.load_screen_time_events", fake_load),
+                patch("ios_activitywatch_importer.importer.load_window_events_from_files", fake_load),
+                patch("ios_activitywatch_importer.importer.derive_afk_events", return_value=[]),
                 patch("ios_activitywatch_importer.importer.project_root", return_value=root),
             ):
                 buffer = StringIO()
@@ -101,7 +104,8 @@ class ImporterTests(unittest.TestCase):
             self.assertIsNone(kwargs["cutoff"])
             self.assertFalse(kwargs["verbose"])
             output = buffer.getvalue()
-            self.assertIn("Bucket aw-watcher-ios: 1 events written.", output)
+            self.assertIn("Bucket aw-watcher-window: 1 events written.", output)
+            self.assertIn("Bucket aw-watcher-afk: 0 events written.", output)
 
     def test_run_import_passes_activitywatch_cutoff_to_loader(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,11 +134,13 @@ class ImporterTests(unittest.TestCase):
             fake_client.get_last_event_end.return_value = last_end
             fake_client.post_events.return_value = len(events)
             fake_load = Mock(return_value=events)
+            fake_usage_files = UsageDataFiles(primary_db=fake_db, interaction_db=fake_db)
 
             with (
-                patch("ios_activitywatch_importer.importer.find_knowledge_db", return_value=fake_db),
+                patch("ios_activitywatch_importer.importer.find_usage_data_files", return_value=fake_usage_files),
                 patch("ios_activitywatch_importer.importer.ActivityWatchClient", return_value=fake_client),
-                patch("ios_activitywatch_importer.importer.load_screen_time_events", fake_load),
+                patch("ios_activitywatch_importer.importer.load_window_events_from_files", fake_load),
+                patch("ios_activitywatch_importer.importer.derive_afk_events", return_value=[]),
                 patch("ios_activitywatch_importer.importer.project_root", return_value=root),
             ):
                 buffer = StringIO()

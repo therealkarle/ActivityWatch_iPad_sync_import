@@ -93,4 +93,4 @@ class ActivityWatchClientTests(unittest.TestCase):
             ],
         )
         self.assertEqual(count, 1)
-        self.assertEqual(_Handler.received_events[-1]["data"]["app"], "Notes")
+        self.assertEqual(_Handler.received_events[-1][0]["data"]["app"], "Notes")

@@ -123,6 +123,16 @@ class ActivityWatchClient:
             )
 
     def post_events(self, bucket_id: str, events: list[dict[str, Any]]) -> int:
+        if not events:
+            return 0
+        status, body = self._request("POST", f"/buckets/{bucket_id}/events", events)
+        if status in (200, 201, 204):
+            return len(events)
+        if status not in (400, 405, 415):
+            raise ActivityWatchError(
+                f"Bulk event import failed (HTTP {status}): {body if body is not None else ''}".strip()
+            )
+
         count = 0
         for event in events:
             self.post_event(bucket_id, event)

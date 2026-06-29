@@ -12,7 +12,9 @@ DEFAULT_CONFIG_EXAMPLE = {
     "backup_base_dir": "C:\\Users\\<USERNAME>\\AppData\\Roaming\\Apple Computer\\MobileSync\\Backup\\",
     "backup_password": "",
     "aw_api_url": "http://localhost:5600/api/0",
-    "bucket_id": "aw-watcher-ios",
+    "bucket_id": "aw-watcher-window",
+    "window_bucket_id": "aw-watcher-window",
+    "afk_bucket_id": "aw-watcher-afk",
     "hostname": "my-iphone",
     "debug_mode": False,
 }
@@ -30,6 +32,8 @@ class AppConfig:
     bucket_id: str
     hostname: str
     debug_mode: bool
+    window_bucket_id: str = "aw-watcher-window"
+    afk_bucket_id: str = "aw-watcher-afk"
 
 
 def project_root() -> Path:
@@ -69,9 +73,15 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
     except json.JSONDecodeError as exc:
         raise ConfigError(f"config.json is not valid JSON: {exc}") from exc
 
-    for key in ("backup_base_dir", "aw_api_url", "bucket_id", "hostname"):
+    for key in ("backup_base_dir", "aw_api_url", "hostname"):
         if key not in raw or not str(raw[key]).strip():
             raise ConfigError(f"config.json does not contain a valid value for '{key}'.")
+
+    bucket_id = str(raw.get("bucket_id", raw.get("window_bucket_id", "aw-watcher-window"))).strip()
+    if not bucket_id:
+        bucket_id = "aw-watcher-window"
+    window_bucket_id = str(raw.get("window_bucket_id", "aw-watcher-window")).strip() or "aw-watcher-window"
+    afk_bucket_id = str(raw.get("afk_bucket_id", "aw-watcher-afk")).strip() or "aw-watcher-afk"
 
     debug_mode_raw = raw.get("debug_mode", False)
     if not isinstance(debug_mode_raw, bool):
@@ -85,7 +95,9 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         backup_base_dir=backup_base_dir,
         backup_password=backup_password,
         aw_api_url=str(raw["aw_api_url"]).rstrip("/"),
-        bucket_id=str(raw["bucket_id"]).strip(),
+        bucket_id=bucket_id,
+        window_bucket_id=window_bucket_id,
+        afk_bucket_id=afk_bucket_id,
         hostname=str(raw["hostname"]).strip(),
         debug_mode=debug_mode_raw,
     )

@@ -4,6 +4,7 @@ import glob
 import os
 import plistlib
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 try:
@@ -22,6 +23,16 @@ from .config import KNOWLEDGE_DB_SHA1
 
 class BackupNotFoundError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class UsageDataFiles:
+    primary_db: Path
+    knowledge_db: Path | None = None
+    interaction_db: Path | None = None
+    safari_history_db: Path | None = None
+    screen_time_agent_plist: Path | None = None
+    screen_time_settings_plist: Path | None = None
 
 
 def _require_iphone_backup_decrypt() -> None:
@@ -190,3 +201,132 @@ def find_knowledge_db(backup_base_dir: Path, backup_password: str | None = None)
     raise BackupNotFoundError(
         f"knowledgeC.db not found under: {backup_base_dir}"
     )
+
+
+def _extract_backup_file(
+    backup: EncryptedBackup,
+    *,
+    relative_path: str,
+    domain: str | None,
+    suffix: str,
+) -> Path | None:
+    try:
+        try:
+            file_bytes = backup.extract_file_as_bytes(relative_path=relative_path, domain_like=domain)
+        except AssertionError:
+            file_bytes = _decrypt_file_without_size_check(backup, relative_path, domain)
+    except Exception:
+        return None
+
+    temp_file = tempfile.NamedTemporaryFile(prefix="ios-aw-", suffix=suffix, delete=False)
+    try:
+        temp_file.write(file_bytes)
+    finally:
+        temp_file.close()
+    return Path(temp_file.name)
+
+
+def _manifest_match(
+    backup: EncryptedBackup,
+    *,
+    relative_path: str,
+    domain: str | None = None,
+) -> tuple[str, str | None] | None:
+    _require_iphone_backup_decrypt()
+    query = """
+        SELECT relativePath, domain
+        FROM Files
+        WHERE lower(relativePath) = lower(?)
+    """
+    params: list[str] = [relative_path]
+    if domain is not None:
+        query += " AND domain = ?"
+        params.append(domain)
+    query += " ORDER BY flags DESC, domain, relativePath LIMIT 1"
+
+    with backup.manifest_db_cursor() as cursor:
+        cursor.execute(query, tuple(params))
+        row = cursor.fetchone()
+    if not row:
+        return None
+    return str(row[0]), str(row[1]) if row[1] is not None else None
+
+
+def _decrypt_usage_data_files(backup_dir: Path, backup_password: str) -> UsageDataFiles:
+    _require_iphone_backup_decrypt()
+    backup = EncryptedBackup(backup_directory=str(backup_dir), passphrase=backup_password)
+    targets = {
+        "knowledge_db": ("Library/CoreDuet/Knowledge/knowledgeC.db", None, ".knowledgeC.db"),
+        "interaction_db": ("Library/CoreDuet/People/interactionC.db", "HomeDomain", ".interactionC.db"),
+        "safari_history_db": ("Library/Safari/History.db", "HomeDomain", ".safari-history.db"),
+        "screen_time_agent_plist": ("Library/Preferences/com.apple.ScreenTimeAgent.plist", "HomeDomain", ".ScreenTimeAgent.plist"),
+        "screen_time_settings_plist": (
+            "Library/Preferences/com.apple.ScreenTimeSettingsAgent.plist",
+            "HomeDomain",
+            ".ScreenTimeSettingsAgent.plist",
+        ),
+    }
+
+    found: dict[str, Path] = {}
+    for key, (relative_path, domain, suffix) in targets.items():
+        match = _manifest_match(backup, relative_path=relative_path, domain=domain)
+        if match is None and key == "knowledge_db":
+            match = _manifest_match(backup, relative_path="knowledgeC.db")
+        if match is None:
+            continue
+        matched_relative_path, matched_domain = match
+        extracted = _extract_backup_file(
+            backup,
+            relative_path=matched_relative_path,
+            domain=matched_domain,
+            suffix=suffix,
+        )
+        if extracted is not None:
+            found[key] = extracted
+
+    primary = found.get("knowledge_db") or found.get("interaction_db")
+    if primary is None:
+        related_rows = _screen_time_related_files(backup)
+        related_suffix = ""
+        if related_rows:
+            related_suffix = f" Found related files: {_format_related_files(related_rows)}."
+        raise BackupNotFoundError(
+            f"No supported usage database found in backup manifest: {backup_dir}.{related_suffix}"
+        )
+
+    return UsageDataFiles(
+        primary_db=primary,
+        knowledge_db=found.get("knowledge_db"),
+        interaction_db=found.get("interaction_db"),
+        safari_history_db=found.get("safari_history_db"),
+        screen_time_agent_plist=found.get("screen_time_agent_plist"),
+        screen_time_settings_plist=found.get("screen_time_settings_plist"),
+    )
+
+
+def find_usage_data_files(backup_base_dir: Path, backup_password: str | None = None) -> UsageDataFiles:
+    if not backup_base_dir.exists():
+        raise BackupNotFoundError(f"backup_base_dir does not exist: {backup_base_dir}")
+
+    direct_knowledge_files = sorted(
+        _direct_knowledge_db_matches(backup_base_dir),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if direct_knowledge_files:
+        return UsageDataFiles(primary_db=direct_knowledge_files[0], knowledge_db=direct_knowledge_files[0])
+
+    backup_dirs = _backup_directories(backup_base_dir)
+    if not backup_dirs:
+        raise BackupNotFoundError(f"usage data files not found under: {backup_base_dir}")
+
+    encrypted_backups = [backup_dir for backup_dir in backup_dirs if _is_encrypted_backup(backup_dir)]
+    if encrypted_backups:
+        if not backup_password:
+            raise BackupNotFoundError(
+                "The found iTunes backup is encrypted. "
+                "Set the backup password in config.json."
+            )
+        return _decrypt_usage_data_files(encrypted_backups[0], backup_password)
+
+    return UsageDataFiles(primary_db=find_knowledge_db(backup_base_dir, backup_password))

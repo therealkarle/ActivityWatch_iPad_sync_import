@@ -47,6 +47,18 @@ class ScreenTimeEvent:
         return max(0.0, (self.end - self.start).total_seconds())
 
 
+@dataclass(frozen=True)
+class AfkEvent:
+    start: datetime
+    end: datetime
+    status: str
+    data: dict[str, Any] | None = None
+
+    @property
+    def duration_seconds(self) -> float:
+        return max(0.0, (self.end - self.start).total_seconds())
+
+
 def coredata_to_datetime(value: Any) -> datetime | None:
     if value is None:
         return None
@@ -237,6 +249,27 @@ def _event_data_from_row(row_dict: dict[str, Any]) -> dict[str, Any] | None:
     account = _normalize_text(row_dict.get("ZACCOUNT"))
     if account:
         data["account"] = account
+
+    content_url = _normalize_text(row_dict.get("ZCONTENTURL"))
+    if content_url:
+        if content_url.startswith(("http://", "https://")):
+            data["url"] = content_url
+        else:
+            data["content_url"] = content_url
+
+    derived_intent_identifier = _normalize_text(row_dict.get("ZDERIVEDINTENTIDENTIFIER"))
+    if derived_intent_identifier:
+        data["derived_intent_identifier"] = derived_intent_identifier
+
+    for numeric_column, data_key in (
+        ("ZDIRECTION", "direction"),
+        ("ZMECHANISM", "mechanism"),
+        ("ZISRESPONSE", "is_response"),
+        ("ZRECIPIENTCOUNT", "recipient_count"),
+    ):
+        value = row_dict.get(numeric_column)
+        if value is not None:
+            data[data_key] = value
 
     return data or None
 
@@ -566,3 +599,180 @@ def load_screen_time_events(
         ) from exc
     finally:
         conn.close()
+
+
+def _has_tables(conn: sqlite3.Connection, table_names: set[str]) -> bool:
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    existing = {str(row[0]) for row in rows}
+    return table_names.issubset(existing)
+
+
+def load_safari_history_events(
+    db_path: Path,
+    cutoff: datetime | None = None,
+    *,
+    reference_time: datetime | None = None,
+    future_tolerance_days: int = 30,
+) -> list[ScreenTimeEvent]:
+    if not db_path.exists():
+        return []
+
+    try:
+        conn = sqlite3.connect(db_path.resolve().as_uri(), uri=True)
+    except sqlite3.Error:
+        return []
+
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _has_tables(conn, {"history_items", "history_visits"}):
+            return []
+
+        query = """
+            SELECT
+                hv.id AS visit_id,
+                hv.visit_time,
+                hv.title,
+                hv.load_successful,
+                hi.url
+            FROM history_visits hv
+            JOIN history_items hi ON hi.id = hv.history_item
+            WHERE hv.visit_time IS NOT NULL
+        """
+        params: list[Any] = []
+        if cutoff is not None:
+            cutoff_core = cutoff.timestamp() - APPLE_SCREEN_TIME_EPOCH
+            query += " AND hv.visit_time > ?"
+            params.append(cutoff_core)
+        query += " ORDER BY hv.visit_time ASC"
+
+        events: list[ScreenTimeEvent] = []
+        for row in conn.execute(query, params).fetchall():
+            start = coredata_to_datetime(row["visit_time"])
+            if start is None:
+                continue
+            end = start + timedelta(seconds=30)
+            if not _is_plausible_event_end(end, reference_time, future_tolerance_days):
+                continue
+            title = _normalize_text(row["title"])
+            url = _normalize_text(row["url"])
+            data: dict[str, Any] = {
+                "source": "safari_history",
+                "source_pk": row["visit_id"],
+            }
+            if title:
+                data["title"] = title
+            if url:
+                data["url"] = url
+            if row["load_successful"] is not None:
+                data["load_successful"] = row["load_successful"]
+            events.append(
+                ScreenTimeEvent(
+                    start=start,
+                    end=end,
+                    app="Safari",
+                    data=data,
+                    source_table="history_visits",
+                    source_pk=row["visit_id"],
+                    raw_start=start,
+                    raw_end=start,
+                    inferred_duration=True,
+                )
+            )
+        return consolidate_screen_time_events(events)
+    except sqlite3.DatabaseError:
+        return []
+    finally:
+        conn.close()
+
+
+def load_window_events_from_files(
+    db_paths: list[Path],
+    *,
+    safari_history_db_path: Path | None = None,
+    cutoff: datetime | None = None,
+    verbose: bool = False,
+    reference_time: datetime | None = None,
+    future_tolerance_days: int = 30,
+) -> list[ScreenTimeEvent]:
+    events: list[ScreenTimeEvent] = []
+    seen_paths: set[Path] = set()
+    for db_path in db_paths:
+        resolved = db_path.resolve()
+        if resolved in seen_paths:
+            continue
+        seen_paths.add(resolved)
+        events.extend(
+            load_screen_time_events(
+                db_path,
+                cutoff=cutoff,
+                verbose=verbose,
+                reference_time=reference_time,
+                future_tolerance_days=future_tolerance_days,
+            )
+        )
+
+    if safari_history_db_path is not None:
+        events.extend(
+            load_safari_history_events(
+                safari_history_db_path,
+                cutoff=cutoff,
+                reference_time=reference_time,
+                future_tolerance_days=future_tolerance_days,
+            )
+        )
+
+    return consolidate_screen_time_events(events)
+
+
+def derive_afk_events(
+    window_events: list[ScreenTimeEvent],
+    *,
+    afk_threshold_seconds: int = 180,
+) -> list[AfkEvent]:
+    active_events = [
+        event for event in sorted(window_events, key=lambda item: (item.start, item.end))
+        if event.end > event.start
+    ]
+    if not active_events:
+        return []
+
+    sessions: list[tuple[datetime, datetime]] = []
+    current_start = active_events[0].start
+    current_end = active_events[0].end
+    for event in active_events[1:]:
+        gap_seconds = (event.start - current_end).total_seconds()
+        if gap_seconds < afk_threshold_seconds:
+            current_end = max(current_end, event.end)
+            continue
+        sessions.append((current_start, current_end))
+        current_start = event.start
+        current_end = event.end
+    sessions.append((current_start, current_end))
+
+    afk_events: list[AfkEvent] = []
+    for index, (start, end) in enumerate(sessions):
+        if end > start:
+            afk_events.append(
+                AfkEvent(
+                    start=start,
+                    end=end,
+                    status="not-afk",
+                    data={"source": "derived_from_window"},
+                )
+            )
+        if index + 1 >= len(sessions):
+            continue
+        next_start = sessions[index + 1][0]
+        if (next_start - end).total_seconds() >= afk_threshold_seconds:
+            afk_events.append(
+                AfkEvent(
+                    start=end,
+                    end=next_start,
+                    status="afk",
+                    data={
+                        "source": "derived_from_window",
+                        "threshold_seconds": afk_threshold_seconds,
+                    },
+                )
+            )
+    return afk_events

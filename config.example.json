@@ -2,7 +2,9 @@
   "backup_base_dir": "C:\\Users\\<USERNAME>\\AppData\\Roaming\\Apple Computer\\MobileSync\\Backup\\",
   "backup_password": "",
   "aw_api_url": "http://localhost:5600/api/0",
-  "bucket_id": "aw-watcher-ios",
+  "bucket_id": "aw-watcher-window",
+  "window_bucket_id": "aw-watcher-window",
+  "afk_bucket_id": "aw-watcher-afk",
   "hostname": "my-iphone",
   "debug_mode": false
 }
