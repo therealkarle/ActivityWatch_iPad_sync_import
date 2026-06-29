@@ -91,12 +91,6 @@ def _write_debug_csv(events, root_dir: Path) -> Path:
     return csv_path
 
 
-def _filter_events_after_cutoff(events, cutoff: datetime | None):
-    if cutoff is None:
-        return list(events)
-    return [event for event in events if event.end > cutoff]
-
-
 def run_import(config: AppConfig, *, verbose: bool = False) -> int:
     if verbose:
         print(f"Backup folder: {config.backup_base_dir}")
@@ -126,13 +120,21 @@ def run_import(config: AppConfig, *, verbose: bool = False) -> int:
         hostname=config.hostname,
     )
     last_end = client.get_last_event_end(config.bucket_id)
+    effective_cutoff = last_end
+    if last_end is not None and last_end > reference_time + timedelta(days=future_tolerance_days):
+        effective_cutoff = None
+        if verbose:
+            print(
+                "Ignoring ActivityWatch cutoff because it is far in the future "
+                f"relative to the backup ({_format_dt(last_end)} > {_format_dt(reference_time + timedelta(days=future_tolerance_days))})."
+            )
     if verbose:
         print(f"Last event in bucket: {_format_dt(last_end)}")
         print("Loading Screen Time events from backup ...")
 
     all_events = load_screen_time_events(
         db_path,
-        cutoff=None,
+        cutoff=effective_cutoff,
         verbose=config.debug_mode,
         reference_time=reference_time,
         future_tolerance_days=future_tolerance_days,
@@ -142,16 +144,7 @@ def run_import(config: AppConfig, *, verbose: bool = False) -> int:
         if verbose:
             print(f"Debug CSV written: {csv_path}")
 
-    effective_cutoff = last_end
-    if last_end is not None and last_end > reference_time + timedelta(days=future_tolerance_days):
-        effective_cutoff = None
-        if verbose:
-            print(
-                "Ignoring ActivityWatch cutoff because it is far in the future "
-                f"relative to the backup ({_format_dt(last_end)} > {_format_dt(reference_time + timedelta(days=future_tolerance_days))})."
-            )
-
-    events = _filter_events_after_cutoff(all_events, effective_cutoff)
+    events = all_events
     if verbose:
         print(f"Found events: {len(events)}")
         if events:

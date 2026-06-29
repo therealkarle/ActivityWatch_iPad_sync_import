@@ -42,12 +42,16 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
-    def do_POST(self):
+    def do_PUT(self):
         if self.path == "/api/0/buckets/aw-watcher-ios":
             type(self).bucket_exists = True
-            self.send_response(304)
+            self.send_response(204)
             self.end_headers()
             return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):
         if self.path == "/api/0/buckets/aw-watcher-ios/events":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length)

@@ -79,9 +79,13 @@ class ActivityWatchClient:
             "hostname": hostname,
             "type": bucket_type,
         }
-        status, _ = self._request("POST", f"/buckets/{bucket_id}", payload)
-        if status not in (200, 201, 204, 304):
-            raise ActivityWatchError(f"Bucket creation failed (HTTP {status}).")
+        for method in ("PUT", "POST"):
+            status, _ = self._request(method, f"/buckets/{bucket_id}", payload)
+            if status in (200, 201, 204, 304):
+                return
+            if status not in (404, 405, 409, 501):
+                break
+        raise ActivityWatchError(f"Bucket creation failed (HTTP {status}).")
 
     def get_last_event_end(self, bucket_id: str) -> datetime | None:
         status, body = self._request("GET", f"/buckets/{bucket_id}/events")

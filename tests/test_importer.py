@@ -83,11 +83,12 @@ class ImporterTests(unittest.TestCase):
             fake_client.ensure_bucket.return_value = None
             fake_client.get_last_event_end.return_value = None
             fake_client.post_events.return_value = len(events)
+            fake_load = Mock(return_value=events)
 
             with (
                 patch("ios_activitywatch_importer.importer.find_knowledge_db", return_value=fake_db),
                 patch("ios_activitywatch_importer.importer.ActivityWatchClient", return_value=fake_client),
-                patch("ios_activitywatch_importer.importer.load_screen_time_events", return_value=events),
+                patch("ios_activitywatch_importer.importer.load_screen_time_events", fake_load),
                 patch("ios_activitywatch_importer.importer.project_root", return_value=root),
             ):
                 buffer = StringIO()
@@ -95,5 +96,51 @@ class ImporterTests(unittest.TestCase):
                     imported = run_import(config, verbose=False)
 
             self.assertEqual(imported, 1)
+            fake_load.assert_called_once()
+            _, kwargs = fake_load.call_args
+            self.assertIsNone(kwargs["cutoff"])
+            self.assertFalse(kwargs["verbose"])
             output = buffer.getvalue()
             self.assertIn("Bucket aw-watcher-ios: 1 events written.", output)
+
+    def test_run_import_passes_activitywatch_cutoff_to_loader(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AppConfig(
+                backup_base_dir=root,
+                backup_password=None,
+                aw_api_url="http://localhost:5600/api/0",
+                bucket_id="aw-watcher-ios",
+                hostname="test-iphone",
+                debug_mode=False,
+            )
+            fake_db = root / "knowledgeC.db"
+            fake_db.write_bytes(b"sqlite-bytes")
+            events = [
+                ScreenTimeEvent(
+                    start=datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc),
+                    end=datetime(2026, 6, 28, 10, 5, tzinfo=timezone.utc),
+                    app="WhatsApp",
+                )
+            ]
+            last_end = datetime(2026, 6, 28, 9, 55, tzinfo=timezone.utc)
+
+            fake_client = Mock()
+            fake_client.ensure_bucket.return_value = None
+            fake_client.get_last_event_end.return_value = last_end
+            fake_client.post_events.return_value = len(events)
+            fake_load = Mock(return_value=events)
+
+            with (
+                patch("ios_activitywatch_importer.importer.find_knowledge_db", return_value=fake_db),
+                patch("ios_activitywatch_importer.importer.ActivityWatchClient", return_value=fake_client),
+                patch("ios_activitywatch_importer.importer.load_screen_time_events", fake_load),
+                patch("ios_activitywatch_importer.importer.project_root", return_value=root),
+            ):
+                buffer = StringIO()
+                with redirect_stdout(buffer):
+                    imported = run_import(config, verbose=False)
+
+            self.assertEqual(imported, 1)
+            _, kwargs = fake_load.call_args
+            self.assertEqual(kwargs["cutoff"], last_end)
