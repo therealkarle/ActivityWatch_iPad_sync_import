@@ -12,10 +12,10 @@ DEFAULT_CONFIG_EXAMPLE = {
     "backup_base_dir": "C:\\Users\\<USERNAME>\\AppData\\Roaming\\Apple Computer\\MobileSync\\Backup\\",
     "backup_password": "",
     "aw_api_url": "http://localhost:5600/api/0",
-    "bucket_id": "aw-watcher-window",
-    "window_bucket_id": "aw-watcher-window",
-    "afk_bucket_id": "aw-watcher-afk",
-    "hostname": "my-iphone",
+    "bucket_id": "aw-watcher-window_FlorianIPad",
+    "window_bucket_id": "aw-watcher-window_FlorianIPad",
+    "afk_bucket_id": "aw-watcher-afk_FlorianIPad",
+    "hostname": "FlorianIPad",
     "debug_mode": False,
 }
 
@@ -58,6 +58,13 @@ def ensure_config_example(base_dir: Path | None = None) -> Path:
     return path
 
 
+def _default_bucket_name(prefix: str, hostname: str) -> str:
+    hostname = hostname.strip()
+    if not hostname:
+        return prefix
+    return f"{prefix}_{hostname}"
+
+
 def load_config(base_dir: Path | None = None) -> AppConfig:
     root = base_dir or project_root()
     cfg_path = config_path(root)
@@ -77,12 +84,6 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         if key not in raw or not str(raw[key]).strip():
             raise ConfigError(f"config.json does not contain a valid value for '{key}'.")
 
-    bucket_id = str(raw.get("bucket_id", raw.get("window_bucket_id", "aw-watcher-window"))).strip()
-    if not bucket_id:
-        bucket_id = "aw-watcher-window"
-    window_bucket_id = str(raw.get("window_bucket_id", "aw-watcher-window")).strip() or "aw-watcher-window"
-    afk_bucket_id = str(raw.get("afk_bucket_id", "aw-watcher-afk")).strip() or "aw-watcher-afk"
-
     debug_mode_raw = raw.get("debug_mode", False)
     if not isinstance(debug_mode_raw, bool):
         raise ConfigError("config.json does not contain a valid value for 'debug_mode'.")
@@ -91,6 +92,21 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         os.path.expandvars(os.path.expanduser(str(raw["backup_base_dir"])))
     )
     backup_password = str(raw.get("backup_password", "")).strip() or None
+    hostname = str(raw["hostname"]).strip()
+    bucket_id = str(
+        raw.get(
+            "bucket_id",
+            raw.get("window_bucket_id", _default_bucket_name("aw-watcher-window", hostname)),
+        )
+    ).strip()
+    if not bucket_id:
+        bucket_id = _default_bucket_name("aw-watcher-window", hostname)
+    window_bucket_id = str(
+        raw.get("window_bucket_id", _default_bucket_name("aw-watcher-window", hostname))
+    ).strip() or _default_bucket_name("aw-watcher-window", hostname)
+    afk_bucket_id = str(
+        raw.get("afk_bucket_id", _default_bucket_name("aw-watcher-afk", hostname))
+    ).strip() or _default_bucket_name("aw-watcher-afk", hostname)
     return AppConfig(
         backup_base_dir=backup_base_dir,
         backup_password=backup_password,
@@ -98,6 +114,6 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         bucket_id=bucket_id,
         window_bucket_id=window_bucket_id,
         afk_bucket_id=afk_bucket_id,
-        hostname=str(raw["hostname"]).strip(),
+        hostname=hostname,
         debug_mode=debug_mode_raw,
     )
