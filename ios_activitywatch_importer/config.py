@@ -102,8 +102,8 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
     if not bucket_id:
         bucket_id = _default_bucket_name("aw-watcher-window", hostname)
     window_bucket_id = str(
-        raw.get("window_bucket_id", _default_bucket_name("aw-watcher-window", hostname))
-    ).strip() or _default_bucket_name("aw-watcher-window", hostname)
+        raw.get("window_bucket_id", bucket_id or _default_bucket_name("aw-watcher-window", hostname))
+    ).strip() or bucket_id or _default_bucket_name("aw-watcher-window", hostname)
     afk_bucket_id = str(
         raw.get("afk_bucket_id", _default_bucket_name("aw-watcher-afk", hostname))
     ).strip() or _default_bucket_name("aw-watcher-afk", hostname)

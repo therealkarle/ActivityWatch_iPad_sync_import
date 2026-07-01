@@ -10,8 +10,9 @@ from unittest.mock import Mock, patch
 from ios_activitywatch_importer.config import AppConfig
 from ios_activitywatch_importer.filesystem import UsageDataFiles
 from ios_activitywatch_importer.importer import _write_debug_copy
+from ios_activitywatch_importer.importer import _write_source_audit_json, _write_source_gaps_csv
 from ios_activitywatch_importer.importer import run_import
-from ios_activitywatch_importer.screen_time import ScreenTimeEvent
+from ios_activitywatch_importer.screen_time import ScreenTimeEvent, SourceAudit
 from ios_activitywatch_importer.importer import _write_debug_csv
 from datetime import datetime, timezone
 
@@ -53,11 +54,49 @@ class ImporterTests(unittest.TestCase):
 
             self.assertEqual(csv_path, root / "debugOut" / "aw-watcher-window.recognized-events.csv")
             content = csv_path.read_text(encoding="utf-8")
-            self.assertIn("source_table,source_pk,raw_start_utc,raw_end_utc,inferred_duration,start_utc,end_utc,duration_seconds,count,app,bundle_id,target_bundle_id,title,domain_identifier,sender,account,url,content_url,derived_intent_identifier,source,domain,source_path,file_size,direction,mechanism,is_response,recipient_count", content)
+            self.assertIn("source_table,source_pk,raw_start_utc,raw_end_utc,inferred_duration,start_utc,end_utc,duration_seconds,count,confidence,source_rank,drop_reason,candidate_source,app,bundle_id,target_bundle_id,title,domain_identifier,sender,account,url,content_url,derived_intent_identifier,source,domain,source_path,file_size,direction,mechanism,is_response,recipient_count", content)
             self.assertIn("ZINTERACTIONS,1", content)
             self.assertIn("true", content)
             self.assertIn("WhatsApp", content)
             self.assertIn("Family", content)
+
+    def test_write_source_audit_json_exports_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = SourceAudit()
+            audit.record_source("coreduet_interactions", candidates=2, accepted=1)
+            audit.record_drop("manifest_fallback", "shadowed_by_higher_rank_source")
+
+            path = _write_source_audit_json(audit, root)
+
+            content = path.read_text(encoding="utf-8")
+            self.assertIn('"coreduet_interactions"', content)
+            self.assertIn('"shadowed_by_higher_rank_source": 1', content)
+
+    def test_write_source_gaps_csv_exports_large_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events = [
+                ScreenTimeEvent(
+                    start=datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc),
+                    end=datetime(2026, 6, 28, 10, 5, tzinfo=timezone.utc),
+                    app="WhatsApp",
+                    candidate_source="coreduet_interactions",
+                ),
+                ScreenTimeEvent(
+                    start=datetime(2026, 6, 28, 10, 20, tzinfo=timezone.utc),
+                    end=datetime(2026, 6, 28, 10, 25, tzinfo=timezone.utc),
+                    app="Safari",
+                    candidate_source="safari_history",
+                ),
+            ]
+
+            path = _write_source_gaps_csv(events, root)
+
+            content = path.read_text(encoding="utf-8")
+            self.assertIn("2026-06-28T10:05:00Z", content)
+            self.assertIn("2026-06-28T10:20:00Z", content)
+            self.assertIn("coreduet_interactions", content)
 
     def test_run_import_always_reports_bucket_and_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

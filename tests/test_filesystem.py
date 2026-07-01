@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import plistlib
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from ios_activitywatch_importer.config import KNOWLEDGE_DB_SHA1
-from ios_activitywatch_importer.filesystem import find_knowledge_db
+from ios_activitywatch_importer.filesystem import find_knowledge_db, find_usage_data_files
 
 
 class FilesystemTests(unittest.TestCase):
@@ -186,3 +187,48 @@ class FilesystemTests(unittest.TestCase):
 
             self.assertTrue(found.exists())
             self.assertEqual(found.read_bytes(), b"interaction-sqlite-bytes")
+
+    def test_unencrypted_manifest_backup_finds_all_usage_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup_dir = root / "00008030-001C195E3E42002E"
+            backup_dir.mkdir(parents=True)
+            with (backup_dir / "Manifest.plist").open("wb") as manifest_file:
+                plistlib.dump({"IsEncrypted": False}, manifest_file)
+            manifest_db = backup_dir / "Manifest.db"
+            conn = sqlite3.connect(manifest_db)
+            conn.execute(
+                """
+                CREATE TABLE Files (
+                    fileID TEXT,
+                    relativePath TEXT,
+                    domain TEXT,
+                    flags INTEGER,
+                    file BLOB
+                )
+                """
+            )
+            rows = [
+                ("aa0001", "Library/CoreDuet/Knowledge/knowledgeC.db", "RootDomain", b"knowledge"),
+                ("bb0002", "Library/CoreDuet/People/interactionC.db", "HomeDomain", b"interaction"),
+                ("cc0003", "Library/Safari/History.db", "HomeDomain", b"safari"),
+                ("dd0004", "Library/Preferences/com.apple.ScreenTimeAgent.plist", "HomeDomain", b"agent"),
+            ]
+            for file_id, relative_path, domain, contents in rows:
+                conn.execute(
+                    "INSERT INTO Files (fileID, relativePath, domain, flags, file) VALUES (?, ?, ?, ?, NULL)",
+                    (file_id, relative_path, domain, 1),
+                )
+                stored = backup_dir / file_id[:2] / file_id
+                stored.parent.mkdir(parents=True, exist_ok=True)
+                stored.write_bytes(contents)
+            conn.commit()
+            conn.close()
+
+            files = find_usage_data_files(root)
+
+            self.assertEqual(files.primary_db.read_bytes(), b"knowledge")
+            self.assertEqual(files.knowledge_db.read_bytes(), b"knowledge")
+            self.assertEqual(files.interaction_db.read_bytes(), b"interaction")
+            self.assertEqual(files.safari_history_db.read_bytes(), b"safari")
+            self.assertEqual(files.screen_time_agent_plist.read_bytes(), b"agent")

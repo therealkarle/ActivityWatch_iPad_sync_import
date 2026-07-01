@@ -55,6 +55,27 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNone(cfg.backup_password)
             self.assertTrue(cfg.debug_mode)
 
+    def test_window_bucket_defaults_to_legacy_bucket_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file = config_path(root)
+            config_file.write_text(
+                json.dumps(
+                    {
+                        "backup_base_dir": "C:\\Users\\Test\\AppData\\Roaming\\Apple Computer\\MobileSync\\Backup\\",
+                        "backup_password": "",
+                        "aw_api_url": "http://localhost:5600/api/0",
+                        "bucket_id": "aw-watcher-ios",
+                        "hostname": "test-iphone",
+                        "debug_mode": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cfg = load_config(root)
+            self.assertEqual(cfg.bucket_id, "aw-watcher-ios")
+            self.assertEqual(cfg.window_bucket_id, "aw-watcher-ios")
+
     def test_loads_backup_password(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

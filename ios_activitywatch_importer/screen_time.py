@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import csv
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +14,8 @@ from .config import APPLE_SCREEN_TIME_EPOCH
 class ScreenTimeError(RuntimeError):
     pass
 
+
+_ZOBJECT_STREAM_TOKENS = ("app", "focus", "display", "web", "safari", "foreground")
 
 _BUNDLE_ID_TO_APP_NAME = {
     "com.apple.DocumentsApp": "Files",
@@ -33,6 +35,12 @@ _BUNDLE_ID_TO_APP_NAME = {
 }
 
 
+def _audit_dt(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 @dataclass(frozen=True)
 class ScreenTimeEvent:
     start: datetime
@@ -45,10 +53,62 @@ class ScreenTimeEvent:
     raw_start: datetime | None = None
     raw_end: datetime | None = None
     inferred_duration: bool = False
+    confidence: float = 1.0
+    source_rank: int = 50
+    drop_reason: str | None = None
+    candidate_source: str | None = None
 
     @property
     def duration_seconds(self) -> float:
         return max(0.0, (self.end - self.start).total_seconds())
+
+
+@dataclass
+class SourceAudit:
+    files: dict[str, dict[str, Any]] = field(default_factory=dict)
+    source_counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    dropped: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    def _file(self, path: Path) -> dict[str, Any]:
+        key = str(path)
+        if key not in self.files:
+            self.files[key] = {"tables": {}, "streams": {}, "date_ranges": {}}
+        return self.files[key]
+
+    def record_table(
+        self,
+        path: Path,
+        table_name: str,
+        row_count: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> None:
+        entry = self._file(path)
+        entry["tables"][table_name] = row_count
+        if start is not None or end is not None:
+            entry["date_ranges"][table_name] = {
+                "start": _audit_dt(start),
+                "end": _audit_dt(end),
+            }
+
+    def record_stream(self, path: Path, stream_name: str, row_count: int) -> None:
+        self._file(path)["streams"][stream_name] = row_count
+
+    def record_source(self, source: str, *, candidates: int = 0, accepted: int = 0) -> None:
+        counts = self.source_counts.setdefault(source, {"candidates": 0, "accepted": 0})
+        counts["candidates"] += candidates
+        counts["accepted"] += accepted
+
+    def record_drop(self, source: str, reason: str, count: int = 1) -> None:
+        reasons = self.dropped.setdefault(source, {})
+        reasons[reason] = reasons.get(reason, 0) + count
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "files": self.files,
+            "source_counts": self.source_counts,
+            "dropped": self.dropped,
+        }
 
 
 @dataclass(frozen=True)
@@ -340,6 +400,10 @@ def consolidate_screen_time_events(
                     "raw_start": event.raw_start or event.start,
                     "raw_end": event.raw_end or event.end,
                     "inferred_duration": event.inferred_duration,
+                    "confidence": event.confidence,
+                    "source_rank": event.source_rank,
+                    "drop_reason": event.drop_reason,
+                    "candidate_source": event.candidate_source,
                 }
             )
             continue
@@ -353,6 +417,10 @@ def consolidate_screen_time_events(
             current["data"] = _merge_event_data(current["data"], event.data)
             current["raw_end"] = max(current["raw_end"], event.raw_end or event.end, event.end)
             current["inferred_duration"] = bool(current["inferred_duration"] or event.inferred_duration)
+            current["confidence"] = max(float(current["confidence"]), float(event.confidence))
+            current["source_rank"] = min(int(current["source_rank"]), int(event.source_rank))
+            if current["candidate_source"] in (None, ""):
+                current["candidate_source"] = event.candidate_source
             continue
 
         sessions.append(
@@ -368,6 +436,10 @@ def consolidate_screen_time_events(
                 "raw_start": event.raw_start or event.start,
                 "raw_end": event.raw_end or event.end,
                 "inferred_duration": event.inferred_duration,
+                "confidence": event.confidence,
+                "source_rank": event.source_rank,
+                "drop_reason": event.drop_reason,
+                "candidate_source": event.candidate_source,
             }
         )
 
@@ -394,6 +466,10 @@ def consolidate_screen_time_events(
                 raw_start=session["raw_start"],
                 raw_end=session["raw_end"],
                 inferred_duration=bool(session["inferred_duration"] or end != session["raw_end"]),
+                confidence=float(session["confidence"]),
+                source_rank=int(session["source_rank"]),
+                drop_reason=session["drop_reason"],
+                candidate_source=session["candidate_source"],
             )
         )
     return consolidated
@@ -438,17 +514,220 @@ def _is_calendar_interaction(row_dict: dict[str, Any]) -> bool:
     return _normalize_text(row_dict.get("ZBUNDLEID")) == "com.apple.mobilecal"
 
 
+def _event_source_metadata(source_table: str, source: str | None = None) -> tuple[int, float, str]:
+    if source_table == "ZOBJECT":
+        return 10, 1.0, "coreduet_zobject"
+    if source_table == "ZINTERACTIONS":
+        return 30, 0.8, "coreduet_interactions"
+    if source_table == "history_visits":
+        return 40, 0.6, "safari_history"
+    if source_table == "Manifest.Files" or source == "app_manifest_mtime":
+        return 90, 0.25, "manifest_fallback"
+    return 50, 0.5, source or source_table
+
+
+def _with_source_metadata(
+    event: ScreenTimeEvent,
+    *,
+    source_rank: int,
+    confidence: float,
+    candidate_source: str,
+    drop_reason: str | None = None,
+) -> ScreenTimeEvent:
+    data = dict(event.data or {})
+    data["confidence"] = confidence
+    data["source_rank"] = source_rank
+    data["candidate_source"] = candidate_source
+    if drop_reason:
+        data["drop_reason"] = drop_reason
+    return ScreenTimeEvent(
+        start=event.start,
+        end=event.end,
+        app=event.app,
+        data=data,
+        count=event.count,
+        source_table=event.source_table,
+        source_pk=event.source_pk,
+        raw_start=event.raw_start,
+        raw_end=event.raw_end,
+        inferred_duration=event.inferred_duration,
+        confidence=confidence,
+        source_rank=source_rank,
+        drop_reason=drop_reason,
+        candidate_source=candidate_source,
+    )
+
+
+def _source_name(event: ScreenTimeEvent) -> str:
+    data = event.data or {}
+    source = _normalize_text(data.get("source"))
+    rank, _confidence, candidate = _event_source_metadata(event.source_table or "", source)
+    if event.candidate_source:
+        return event.candidate_source
+    if candidate:
+        return candidate
+    return f"rank_{rank}"
+
+
+def _event_rank(event: ScreenTimeEvent) -> int:
+    data = event.data or {}
+    if event.source_rank != 50:
+        return event.source_rank
+    try:
+        return int(data.get("source_rank", 50))
+    except (TypeError, ValueError):
+        return _event_source_metadata(event.source_table or "", _normalize_text(data.get("source")))[0]
+
+
+def _events_are_near(left: ScreenTimeEvent, right: ScreenTimeEvent, window_seconds: int) -> bool:
+    if left.end >= right.start and right.end >= left.start:
+        return True
+    gap_seconds = min(
+        abs((left.start - right.end).total_seconds()),
+        abs((right.start - left.end).total_seconds()),
+    )
+    return gap_seconds <= window_seconds
+
+
+def _event_overlap_seconds(left: ScreenTimeEvent, right: ScreenTimeEvent) -> float:
+    start = max(left.start, right.start)
+    end = min(left.end, right.end)
+    return max(0.0, (end - start).total_seconds())
+
+
+def _consolidate_events_by_session_key(
+    events: list[ScreenTimeEvent],
+    *,
+    session_gap_seconds: int,
+) -> list[ScreenTimeEvent]:
+    grouped: dict[tuple[str, str], list[ScreenTimeEvent]] = {}
+    for event in events:
+        grouped.setdefault(_session_key(event), []).append(event)
+
+    consolidated: list[ScreenTimeEvent] = []
+    for group_events in grouped.values():
+        consolidated.extend(
+            consolidate_screen_time_events(group_events, session_gap_seconds=session_gap_seconds)
+        )
+    return sorted(consolidated, key=lambda item: (item.start, item.end, item.app))
+
+
+def _consolidate_events_by_source(events: list[ScreenTimeEvent]) -> list[ScreenTimeEvent]:
+    grouped: dict[tuple[int, str, str], list[ScreenTimeEvent]] = {}
+    for event in events:
+        key = (_event_rank(event), _source_name(event), event.source_table or "")
+        grouped.setdefault(key, []).append(event)
+
+    consolidated: list[ScreenTimeEvent] = []
+    for key, group_events in grouped.items():
+        _rank, source, _source_table = key
+        if source == "manifest_fallback":
+            consolidated.extend(
+                _consolidate_events_by_session_key(
+                    group_events,
+                    session_gap_seconds=1800,
+                )
+            )
+            continue
+        consolidated.extend(consolidate_screen_time_events(group_events))
+    return consolidated
+
+
+def _is_shadowed_by_higher_rank_source(
+    event: ScreenTimeEvent,
+    accepted: list[ScreenTimeEvent],
+    *,
+    fallback_near_seconds: int,
+    long_fallback_seconds: int,
+    covered_fraction_threshold: float,
+) -> bool:
+    higher_rank_neighbors = [
+        existing
+        for existing in accepted
+        if _event_rank(existing) < _event_rank(event)
+        and _events_are_near(existing, event, fallback_near_seconds)
+    ]
+    if not higher_rank_neighbors:
+        return False
+
+    if event.duration_seconds < long_fallback_seconds:
+        return True
+
+    covered_seconds = sum(_event_overlap_seconds(existing, event) for existing in higher_rank_neighbors)
+    covered_fraction = covered_seconds / max(event.duration_seconds, 1.0)
+    return covered_fraction >= covered_fraction_threshold
+
+
+def rank_and_consolidate_events(
+    events: list[ScreenTimeEvent],
+    *,
+    audit: SourceAudit | None = None,
+    fallback_near_seconds: int = 120,
+    long_fallback_seconds: int = 300,
+    covered_fraction_threshold: float = 0.5,
+) -> list[ScreenTimeEvent]:
+    ranked: list[ScreenTimeEvent] = []
+    for event in events:
+        source_rank, confidence, candidate_source = _event_source_metadata(
+            event.source_table or "",
+            _normalize_text((event.data or {}).get("source")),
+        )
+        ranked.append(
+            _with_source_metadata(
+                event,
+                source_rank=event.source_rank if event.source_rank != 50 else source_rank,
+                confidence=event.confidence if event.confidence != 1.0 else confidence,
+                candidate_source=event.candidate_source or candidate_source,
+            )
+        )
+
+    ranked = _consolidate_events_by_source(ranked)
+    accepted: list[ScreenTimeEvent] = []
+    dropped: list[ScreenTimeEvent] = []
+    for event in sorted(ranked, key=lambda item: (_event_rank(item), item.start, -item.duration_seconds)):
+        source = _source_name(event)
+        if audit is not None:
+            audit.record_source(f"final:{source}", candidates=1)
+        suppress = _is_shadowed_by_higher_rank_source(
+            event,
+            accepted,
+            fallback_near_seconds=fallback_near_seconds,
+            long_fallback_seconds=long_fallback_seconds,
+            covered_fraction_threshold=covered_fraction_threshold,
+        )
+        if suppress:
+            dropped_event = _with_source_metadata(
+                event,
+                source_rank=_event_rank(event),
+                confidence=event.confidence,
+                candidate_source=source,
+                drop_reason="shadowed_by_higher_rank_source",
+            )
+            dropped.append(dropped_event)
+            if audit is not None:
+                audit.record_drop(f"final:{source}", "shadowed_by_higher_rank_source")
+            continue
+        accepted.append(event)
+        if audit is not None:
+            audit.record_source(f"final:{source}", accepted=1)
+
+    consolidated = consolidate_screen_time_events(accepted)
+    return sorted(consolidated, key=lambda item: (item.start, item.end, item.app))
+
+
 def _load_events_from_zobject(
     conn: sqlite3.Connection,
     schema: dict[str, list[str]],
     cutoff: datetime | None,
     *,
+    db_path: Path | None = None,
+    audit: SourceAudit | None = None,
     verbose: bool = False,
     reference_time: datetime | None = None,
     future_tolerance_days: int = 30,
 ) -> list[ScreenTimeEvent]:
-    query = 'SELECT * FROM "ZOBJECT" WHERE ZSTREAMNAME = ? AND ZSTARTDATE IS NOT NULL AND ZENDDATE IS NOT NULL'
-    params: list[Any] = ["/app/inFocus"]
+    query = 'SELECT * FROM "ZOBJECT" WHERE ZSTARTDATE IS NOT NULL AND ZENDDATE IS NOT NULL'
+    params: list[Any] = []
     if cutoff is not None:
         cutoff_core = cutoff.timestamp() - APPLE_SCREEN_TIME_EPOCH
         query += " AND ZENDDATE > ?"
@@ -458,25 +737,53 @@ def _load_events_from_zobject(
     events: list[ScreenTimeEvent] = []
     rows = conn.execute(query, params).fetchall()
     _debug_print(verbose, f"ZOBJECT candidate rows after cutoff: {len(rows)}")
+    if audit is not None:
+        audit.record_source("coreduet_zobject", candidates=len(rows))
     for row in rows:
+        row_dict = {key: row[key] for key in row.keys()}
+        stream_name = _normalize_text(row_dict.get("ZSTREAMNAME")) or ""
+        if stream_name and not any(token in stream_name.lower() for token in _ZOBJECT_STREAM_TOKENS):
+            if audit is not None:
+                audit.record_drop("coreduet_zobject", f"unsupported_stream:{stream_name}")
+            continue
         start = coredata_to_datetime(row["ZSTARTDATE"])
         end = coredata_to_datetime(row["ZENDDATE"])
         if start is None or end is None or end <= start:
+            if audit is not None:
+                audit.record_drop("coreduet_zobject", "invalid_time_range")
             continue
         if not _is_plausible_event_end(end, reference_time, future_tolerance_days):
+            if audit is not None:
+                audit.record_drop("coreduet_zobject", "future_outlier")
             continue
         app_name = _extract_app_name_from_row(conn, row, schema)
+        if not _is_meaningful_app_name(app_name):
+            if audit is not None:
+                audit.record_drop("coreduet_zobject", "unknown_app")
+            continue
+        data = _event_data_from_row(row_dict) or {}
+        data["source"] = "zobject"
+        if stream_name:
+            data["stream_name"] = stream_name
+        if "Z_PK" in row.keys():
+            data["source_pk"] = row["Z_PK"]
         events.append(
             ScreenTimeEvent(
                 start=start,
                 end=end,
                 app=app_name,
+                data=data,
                 source_table="ZOBJECT",
                 source_pk=row["Z_PK"] if "Z_PK" in row.keys() else None,
                 raw_start=start,
                 raw_end=end,
+                confidence=1.0,
+                source_rank=10,
+                candidate_source="coreduet_zobject",
             )
         )
+    if audit is not None:
+        audit.record_source("coreduet_zobject", accepted=len(events))
     return events
 
 
@@ -485,6 +792,7 @@ def _load_events_from_zinteractions(
     schema: dict[str, list[str]],
     cutoff: datetime | None,
     *,
+    audit: SourceAudit | None = None,
     verbose: bool = False,
     reference_time: datetime | None = None,
     future_tolerance_days: int = 30,
@@ -500,20 +808,32 @@ def _load_events_from_zinteractions(
     events: list[ScreenTimeEvent] = []
     rows = conn.execute(query, params).fetchall()
     _debug_print(verbose, f"ZINTERACTIONS candidate rows after cutoff: {len(rows)}")
+    if audit is not None:
+        audit.record_source("coreduet_interactions", candidates=len(rows))
     for row in rows:
         start = coredata_to_datetime(row["ZSTARTDATE"])
         end = coredata_to_datetime(row["ZENDDATE"])
         if start is None or end is None:
+            if audit is not None:
+                audit.record_drop("coreduet_interactions", "invalid_time_range")
             continue
         if end < start:
+            if audit is not None:
+                audit.record_drop("coreduet_interactions", "negative_duration")
             continue
         if not _is_plausible_event_end(end, reference_time, future_tolerance_days):
+            if audit is not None:
+                audit.record_drop("coreduet_interactions", "future_outlier")
             continue
         row_dict = {key: row[key] for key in row.keys()}
         if _is_calendar_interaction(row_dict):
+            if audit is not None:
+                audit.record_drop("coreduet_interactions", "calendar_interaction")
             continue
         app_name = _extract_app_name_from_row(conn, row, schema)
         if not _is_meaningful_app_name(app_name) and app_name != "unknown":
+            if audit is not None:
+                audit.record_drop("coreduet_interactions", "unknown_app")
             continue
         data = _event_data_from_row(row_dict) or {}
         data["source"] = "zinteractions"
@@ -530,8 +850,13 @@ def _load_events_from_zinteractions(
                 raw_start=start,
                 raw_end=end,
                 inferred_duration=end == start,
+                confidence=0.8,
+                source_rank=30,
+                candidate_source="coreduet_interactions",
             )
         )
+    if audit is not None:
+        audit.record_source("coreduet_interactions", accepted=len(events))
     return events
 
 
@@ -539,6 +864,7 @@ def load_screen_time_events(
     db_path: Path,
     cutoff: datetime | None = None,
     *,
+    audit: SourceAudit | None = None,
     verbose: bool = False,
     reference_time: datetime | None = None,
     future_tolerance_days: int = 30,
@@ -559,6 +885,19 @@ def load_screen_time_events(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
+        if audit is not None:
+            for table_name in sorted(schema):
+                start_dt = end_dt = None
+                columns_upper = {column.upper() for column in schema[table_name]}
+                if {"ZSTARTDATE", "ZENDDATE"}.issubset(columns_upper):
+                    start_dt, end_dt = _table_date_range(conn, table_name, "ZSTARTDATE", "ZENDDATE")
+                audit.record_table(db_path, table_name, _table_row_count(conn, table_name), start_dt, end_dt)
+            if "ZOBJECT" in schema and "ZSTREAMNAME" in {column.upper() for column in schema["ZOBJECT"]}:
+                stream_rows = conn.execute(
+                    'SELECT ZSTREAMNAME, COUNT(*) FROM "ZOBJECT" GROUP BY ZSTREAMNAME ORDER BY COUNT(*) DESC'
+                ).fetchall()
+                for stream_name, row_count in stream_rows:
+                    audit.record_stream(db_path, str(stream_name or ""), int(row_count or 0))
         if verbose:
             table_names = ", ".join(sorted(schema)) or "(none)"
             print(f"SQLite tables: {table_names}")
@@ -582,25 +921,33 @@ def load_screen_time_events(
                     )
             if cutoff is not None:
                 print(f"Cutoff event end: {cutoff.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')}")
+        events: list[ScreenTimeEvent] = []
         if "ZOBJECT" in schema:
-            events = _load_events_from_zobject(
-                conn,
-                schema,
-                cutoff,
-                verbose=verbose,
-                reference_time=reference_time,
-                future_tolerance_days=future_tolerance_days,
+            events.extend(
+                _load_events_from_zobject(
+                    conn,
+                    schema,
+                    cutoff,
+                    db_path=db_path,
+                    audit=audit,
+                    verbose=verbose,
+                    reference_time=reference_time,
+                    future_tolerance_days=future_tolerance_days,
+                )
             )
-            return consolidate_screen_time_events(events)
         if "ZINTERACTIONS" in schema:
-            events = _load_events_from_zinteractions(
-                conn,
-                schema,
-                cutoff,
-                verbose=verbose,
-                reference_time=reference_time,
-                future_tolerance_days=future_tolerance_days,
+            events.extend(
+                _load_events_from_zinteractions(
+                    conn,
+                    schema,
+                    cutoff,
+                    audit=audit,
+                    verbose=verbose,
+                    reference_time=reference_time,
+                    future_tolerance_days=future_tolerance_days,
+                )
             )
+        if events or "ZOBJECT" in schema or "ZINTERACTIONS" in schema:
             return consolidate_screen_time_events(events)
         raise ScreenTimeError(
             "No supported tables were found in the SQLite database. "
@@ -625,6 +972,7 @@ def load_safari_history_events(
     db_path: Path,
     cutoff: datetime | None = None,
     *,
+    audit: SourceAudit | None = None,
     reference_time: datetime | None = None,
     future_tolerance_days: int = 30,
 ) -> list[ScreenTimeEvent]:
@@ -639,7 +987,12 @@ def load_safari_history_events(
     conn.row_factory = sqlite3.Row
     try:
         if not _has_tables(conn, {"history_items", "history_visits"}):
+            if audit is not None:
+                audit.record_drop("safari_history", "missing_history_tables")
             return []
+        if audit is not None:
+            audit.record_table(db_path, "history_items", _table_row_count(conn, "history_items"))
+            audit.record_table(db_path, "history_visits", _table_row_count(conn, "history_visits"))
 
         query = """
             SELECT
@@ -660,12 +1013,19 @@ def load_safari_history_events(
         query += " ORDER BY hv.visit_time ASC"
 
         events: list[ScreenTimeEvent] = []
-        for row in conn.execute(query, params).fetchall():
+        rows = conn.execute(query, params).fetchall()
+        if audit is not None:
+            audit.record_source("safari_history", candidates=len(rows))
+        for row in rows:
             start = coredata_to_datetime(row["visit_time"])
             if start is None:
+                if audit is not None:
+                    audit.record_drop("safari_history", "invalid_time")
                 continue
             end = start + timedelta(seconds=30)
             if not _is_plausible_event_end(end, reference_time, future_tolerance_days):
+                if audit is not None:
+                    audit.record_drop("safari_history", "future_outlier")
                 continue
             title = _normalize_text(row["title"])
             url = _normalize_text(row["url"])
@@ -690,8 +1050,13 @@ def load_safari_history_events(
                     raw_start=start,
                     raw_end=start,
                     inferred_duration=True,
+                    confidence=0.6,
+                    source_rank=40,
+                    candidate_source="safari_history",
                 )
             )
+        if audit is not None:
+            audit.record_source("safari_history", accepted=len(events))
         return consolidate_screen_time_events(events)
     except sqlite3.DatabaseError:
         return []
@@ -703,6 +1068,7 @@ def load_manifest_app_activity_events(
     csv_path: Path,
     cutoff: datetime | None = None,
     *,
+    audit: SourceAudit | None = None,
     reference_time: datetime | None = None,
     future_tolerance_days: int = 30,
 ) -> list[ScreenTimeEvent]:
@@ -714,17 +1080,27 @@ def load_manifest_app_activity_events(
         with csv_path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
+                if audit is not None:
+                    audit.record_source("manifest_fallback", candidates=1)
                 bundle_id = _bundle_id_from_app_domain(row.get("domain", ""))
                 if not bundle_id:
+                    if audit is not None:
+                        audit.record_drop("manifest_fallback", "unsupported_domain")
                     continue
                 try:
                     modified = datetime.fromtimestamp(float(row.get("mtime", 0)), tz=timezone.utc)
                 except (TypeError, ValueError, OSError):
+                    if audit is not None:
+                        audit.record_drop("manifest_fallback", "invalid_mtime")
                     continue
                 if cutoff is not None and modified <= cutoff:
+                    if audit is not None:
+                        audit.record_drop("manifest_fallback", "before_cutoff")
                     continue
                 end = modified + timedelta(seconds=30)
                 if not _is_plausible_event_end(end, reference_time, future_tolerance_days):
+                    if audit is not None:
+                        audit.record_drop("manifest_fallback", "future_outlier")
                     continue
                 app_name = _humanize_bundle_id(bundle_id)
                 data: dict[str, Any] = {
@@ -747,11 +1123,16 @@ def load_manifest_app_activity_events(
                         raw_start=modified,
                         raw_end=modified,
                         inferred_duration=True,
+                        confidence=0.25,
+                        source_rank=90,
+                        candidate_source="manifest_fallback",
                     )
                 )
     except OSError:
         return []
-    return consolidate_screen_time_events(events)
+    if audit is not None:
+        audit.record_source("manifest_fallback", accepted=len(events))
+    return _consolidate_events_by_session_key(events, session_gap_seconds=1800)
 
 
 def load_window_events_from_files(
@@ -760,6 +1141,7 @@ def load_window_events_from_files(
     safari_history_db_path: Path | None = None,
     app_activity_manifest_csv_path: Path | None = None,
     cutoff: datetime | None = None,
+    audit: SourceAudit | None = None,
     verbose: bool = False,
     reference_time: datetime | None = None,
     future_tolerance_days: int = 30,
@@ -775,6 +1157,7 @@ def load_window_events_from_files(
             load_screen_time_events(
                 db_path,
                 cutoff=cutoff,
+                audit=audit,
                 verbose=verbose,
                 reference_time=reference_time,
                 future_tolerance_days=future_tolerance_days,
@@ -786,6 +1169,7 @@ def load_window_events_from_files(
             load_safari_history_events(
                 safari_history_db_path,
                 cutoff=cutoff,
+                audit=audit,
                 reference_time=reference_time,
                 future_tolerance_days=future_tolerance_days,
             )
@@ -796,12 +1180,13 @@ def load_window_events_from_files(
             load_manifest_app_activity_events(
                 app_activity_manifest_csv_path,
                 cutoff=cutoff,
+                audit=audit,
                 reference_time=reference_time,
                 future_tolerance_days=future_tolerance_days,
             )
         )
 
-    return consolidate_screen_time_events(events)
+    return rank_and_consolidate_events(events, audit=audit)
 
 
 def derive_afk_events(

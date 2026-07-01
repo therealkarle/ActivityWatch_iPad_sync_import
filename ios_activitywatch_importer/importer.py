@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 from .activitywatch_client import ActivityWatchClient
 from .config import AppConfig, project_root
 from .filesystem import UsageDataFiles, find_usage_data_files
-from .screen_time import AfkEvent, ScreenTimeEvent, derive_afk_events, load_window_events_from_files
+from .screen_time import AfkEvent, ScreenTimeEvent, SourceAudit, derive_afk_events, load_window_events_from_files
 
 
 def _parse_aw_timestamp(value: object) -> datetime | None:
@@ -144,6 +145,10 @@ def _write_debug_csv(events, root_dir: Path) -> Path:
         "end_utc",
         "duration_seconds",
         "count",
+        "confidence",
+        "source_rank",
+        "drop_reason",
+        "candidate_source",
         "app",
         "bundle_id",
         "target_bundle_id",
@@ -180,6 +185,10 @@ def _write_debug_csv(events, root_dir: Path) -> Path:
                     "inferred_duration": str(bool(getattr(event, "inferred_duration", False))).lower(),
                     "duration_seconds": f"{event.duration_seconds:.6f}",
                     "count": getattr(event, "count", 1),
+                    "confidence": f"{getattr(event, 'confidence', 1.0):.2f}",
+                    "source_rank": getattr(event, "source_rank", ""),
+                    "drop_reason": getattr(event, "drop_reason", "") or data.get("drop_reason", ""),
+                    "candidate_source": getattr(event, "candidate_source", "") or data.get("candidate_source", ""),
                     "app": event.app,
                     "bundle_id": data.get("bundle_id", ""),
                     "target_bundle_id": data.get("target_bundle_id", ""),
@@ -201,6 +210,53 @@ def _write_debug_csv(events, root_dir: Path) -> Path:
                 }
             )
     return csv_path
+
+
+def _write_source_audit_json(audit: SourceAudit, root_dir: Path) -> Path:
+    debug_dir = root_dir / "debugOut"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    path = debug_dir / "source-audit.json"
+    path.write_text(json.dumps(audit.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def _write_source_gaps_csv(events: list[ScreenTimeEvent], root_dir: Path, *, min_gap_seconds: int = 300) -> Path:
+    debug_dir = root_dir / "debugOut"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    path = debug_dir / "source-gaps.csv"
+    fieldnames = [
+        "gap_start_utc",
+        "gap_end_utc",
+        "gap_seconds",
+        "previous_app",
+        "previous_source",
+        "next_app",
+        "next_source",
+    ]
+    ordered = sorted(events, key=lambda event: (event.start, event.end))
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for previous, next_event in zip(ordered, ordered[1:]):
+            if next_event.start <= previous.end:
+                continue
+            gap_seconds = (next_event.start - previous.end).total_seconds()
+            if gap_seconds < min_gap_seconds:
+                continue
+            previous_data = previous.data or {}
+            next_data = next_event.data or {}
+            writer.writerow(
+                {
+                    "gap_start_utc": _format_dt(previous.end),
+                    "gap_end_utc": _format_dt(next_event.start),
+                    "gap_seconds": f"{gap_seconds:.6f}",
+                    "previous_app": previous.app,
+                    "previous_source": previous.candidate_source or previous_data.get("candidate_source", ""),
+                    "next_app": next_event.app,
+                    "next_source": next_event.candidate_source or next_data.get("candidate_source", ""),
+                }
+            )
+    return path
 
 
 def _write_afk_debug_csv(events: list[AfkEvent], root_dir: Path) -> Path:
@@ -292,11 +348,13 @@ def run_import(config: AppConfig, *, verbose: bool = False) -> int:
         print(f"Last AFK event in bucket: {_format_dt(afk_last_end)}")
         print("Loading usage events from backup ...")
 
+    source_audit = SourceAudit() if config.debug_mode else None
     source_events = load_window_events_from_files(
         _usage_db_paths(usage_files),
         safari_history_db_path=usage_files.safari_history_db,
         app_activity_manifest_csv_path=usage_files.app_activity_manifest_csv,
         cutoff=None,
+        audit=source_audit,
         verbose=config.debug_mode,
         reference_time=reference_time,
         future_tolerance_days=future_tolerance_days,
@@ -306,9 +364,14 @@ def run_import(config: AppConfig, *, verbose: bool = False) -> int:
     if config.debug_mode:
         csv_path = _write_debug_csv(all_events, project_root())
         afk_csv_path = _write_afk_debug_csv(all_afk_events, project_root())
+        audit_path = _write_source_audit_json(source_audit, project_root()) if source_audit is not None else None
+        gaps_path = _write_source_gaps_csv(all_events, project_root())
         if verbose:
             print(f"Window debug CSV written: {csv_path}")
             print(f"AFK debug CSV written: {afk_csv_path}")
+            if audit_path is not None:
+                print(f"Source audit written: {audit_path}")
+            print(f"Source gaps CSV written: {gaps_path}")
 
     events = all_events
     if verbose:

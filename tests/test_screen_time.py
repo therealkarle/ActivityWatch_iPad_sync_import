@@ -8,9 +8,12 @@ from pathlib import Path
 
 from ios_activitywatch_importer.config import APPLE_SCREEN_TIME_EPOCH
 from ios_activitywatch_importer.screen_time import (
+    SourceAudit,
     coredata_to_datetime,
     load_manifest_app_activity_events,
     load_screen_time_events,
+    rank_and_consolidate_events,
+    ScreenTimeEvent,
 )
 
 
@@ -44,6 +47,208 @@ class ScreenTimeTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0].app, "Safari")
             self.assertEqual(events[0].duration_seconds, 30.0)
+
+    def test_falls_back_to_interactions_when_zobject_has_no_usable_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "mixed.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE ZOBJECT (
+                    ZSTREAMNAME TEXT,
+                    ZSTARTDATE REAL,
+                    ZENDDATE REAL,
+                    ZVALUESTRING TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE ZINTERACTIONS (
+                    ZBUNDLEID TEXT,
+                    ZGROUPNAME TEXT,
+                    ZSTARTDATE REAL,
+                    ZENDDATE REAL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO ZOBJECT (ZSTREAMNAME, ZSTARTDATE, ZENDDATE, ZVALUESTRING) VALUES (?, ?, ?, ?)",
+                ("/app/inFocus", 10.0, 10.0, "Safari"),
+            )
+            conn.execute(
+                "INSERT INTO ZINTERACTIONS (ZBUNDLEID, ZGROUPNAME, ZSTARTDATE, ZENDDATE) VALUES (?, ?, ?, ?)",
+                ("net.whatsapp.WhatsApp", "Family", 30.0, 90.0),
+            )
+            conn.commit()
+            conn.close()
+
+            events = load_screen_time_events(db_path)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].app, "WhatsApp")
+            self.assertEqual(events[0].source_table, "ZINTERACTIONS")
+
+    def test_combines_zobject_and_interactions_from_same_db(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "mixed.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE ZOBJECT (
+                    ZSTREAMNAME TEXT,
+                    ZSTARTDATE REAL,
+                    ZENDDATE REAL,
+                    ZVALUESTRING TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE ZINTERACTIONS (
+                    ZBUNDLEID TEXT,
+                    ZGROUPNAME TEXT,
+                    ZSTARTDATE REAL,
+                    ZENDDATE REAL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO ZOBJECT (ZSTREAMNAME, ZSTARTDATE, ZENDDATE, ZVALUESTRING) VALUES (?, ?, ?, ?)",
+                ("/app/inFocus", 10.0, 70.0, "Safari"),
+            )
+            conn.execute(
+                "INSERT INTO ZINTERACTIONS (ZBUNDLEID, ZGROUPNAME, ZSTARTDATE, ZENDDATE) VALUES (?, ?, ?, ?)",
+                ("net.whatsapp.WhatsApp", "Family", 100.0, 160.0),
+            )
+            conn.commit()
+            conn.close()
+
+            events = load_screen_time_events(db_path)
+            self.assertEqual(len(events), 2)
+            self.assertEqual([event.app for event in events], ["Safari", "WhatsApp"])
+            self.assertEqual([event.source_table for event in events], ["ZOBJECT", "ZINTERACTIONS"])
+
+    def test_zobject_loads_supported_streams_and_audits_unknown_streams(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "knowledge.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE ZOBJECT (
+                    ZSTREAMNAME TEXT,
+                    ZSTARTDATE REAL,
+                    ZENDDATE REAL,
+                    ZBUNDLEID TEXT
+                )
+                """
+            )
+            conn.executemany(
+                "INSERT INTO ZOBJECT (ZSTREAMNAME, ZSTARTDATE, ZENDDATE, ZBUNDLEID) VALUES (?, ?, ?, ?)",
+                [
+                    ("/app/inFocus", 10.0, 40.0, "com.google.Gmail"),
+                    ("/device/noise", 50.0, 80.0, "net.whatsapp.WhatsApp"),
+                ],
+            )
+            conn.commit()
+            conn.close()
+            audit = SourceAudit()
+
+            events = load_screen_time_events(db_path, audit=audit)
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].app, "Gmail")
+            self.assertEqual(events[0].data["stream_name"], "/app/inFocus")
+            self.assertEqual(audit.files[str(db_path)]["streams"]["/device/noise"], 1)
+            self.assertEqual(audit.dropped["coreduet_zobject"]["unsupported_stream:/device/noise"], 1)
+
+    def test_higher_rank_events_shadow_nearby_manifest_fallback(self) -> None:
+        real_event = ScreenTimeEvent(
+            start=datetime(2026, 6, 28, 20, 0, tzinfo=timezone.utc),
+            end=datetime(2026, 6, 28, 20, 5, tzinfo=timezone.utc),
+            app="WhatsApp",
+            data={"bundle_id": "net.whatsapp.WhatsApp", "source": "zinteractions"},
+            source_table="ZINTERACTIONS",
+            confidence=0.8,
+            source_rank=30,
+            candidate_source="coreduet_interactions",
+        )
+        fallback_event = ScreenTimeEvent(
+            start=datetime(2026, 6, 28, 20, 1, tzinfo=timezone.utc),
+            end=datetime(2026, 6, 28, 20, 1, 30, tzinfo=timezone.utc),
+            app="WhatsApp",
+            data={"bundle_id": "net.whatsapp.WhatsApp", "source": "app_manifest_mtime"},
+            source_table="Manifest.Files",
+            confidence=0.25,
+            source_rank=90,
+            candidate_source="manifest_fallback",
+        )
+        audit = SourceAudit()
+
+        events = rank_and_consolidate_events([fallback_event, real_event], audit=audit)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].source_table, "ZINTERACTIONS")
+        self.assertEqual(audit.dropped["final:manifest_fallback"]["shadowed_by_higher_rank_source"], 1)
+
+    def test_manifest_fallback_remains_when_no_higher_rank_source_is_nearby(self) -> None:
+        fallback_event = ScreenTimeEvent(
+            start=datetime(2026, 6, 28, 20, 1, tzinfo=timezone.utc),
+            end=datetime(2026, 6, 28, 20, 1, 30, tzinfo=timezone.utc),
+            app="Fitbit Mobile",
+            data={"bundle_id": "com.fitbit.FitbitMobile", "source": "app_manifest_mtime"},
+            source_table="Manifest.Files",
+            confidence=0.25,
+            source_rank=90,
+            candidate_source="manifest_fallback",
+        )
+
+        events = rank_and_consolidate_events([fallback_event])
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].app, "Fitbit Mobile")
+        self.assertEqual(events[0].confidence, 0.25)
+
+    def test_long_manifest_session_is_not_fully_shadowed_by_short_interaction(self) -> None:
+        real_event = ScreenTimeEvent(
+            start=datetime(2026, 6, 28, 18, 31, tzinfo=timezone.utc),
+            end=datetime(2026, 6, 28, 18, 43, tzinfo=timezone.utc),
+            app="WhatsApp",
+            data={"bundle_id": "net.whatsapp.WhatsApp", "source": "zinteractions"},
+            source_table="ZINTERACTIONS",
+            confidence=0.8,
+            source_rank=30,
+            candidate_source="coreduet_interactions",
+        )
+        fallback_events = [
+            ScreenTimeEvent(
+                start=datetime(2026, 6, 28, 18, 34, tzinfo=timezone.utc),
+                end=datetime(2026, 6, 28, 18, 34, 30, tzinfo=timezone.utc),
+                app="TikTok",
+                data={"bundle_id": "com.zhiliaoapp.musically", "source": "app_manifest_mtime"},
+                source_table="Manifest.Files",
+                confidence=0.25,
+                source_rank=90,
+                candidate_source="manifest_fallback",
+            ),
+            ScreenTimeEvent(
+                start=datetime(2026, 6, 28, 18, 58, tzinfo=timezone.utc),
+                end=datetime(2026, 6, 28, 18, 58, 30, tzinfo=timezone.utc),
+                app="TikTok",
+                data={"bundle_id": "com.zhiliaoapp.musically", "source": "app_manifest_mtime"},
+                source_table="Manifest.Files",
+                confidence=0.25,
+                source_rank=90,
+                candidate_source="manifest_fallback",
+            ),
+        ]
+
+        events = rank_and_consolidate_events([real_event, *fallback_events])
+
+        self.assertEqual([event.app for event in events], ["WhatsApp", "TikTok"])
+        self.assertEqual(events[0].end, datetime(2026, 6, 28, 18, 34, tzinfo=timezone.utc))
+        self.assertEqual(events[1].start, datetime(2026, 6, 28, 18, 34, tzinfo=timezone.utc))
+        self.assertEqual(events[1].end, datetime(2026, 6, 28, 18, 58, 30, tzinfo=timezone.utc))
+        self.assertEqual(events[1].count, 2)
 
     def test_extraction_from_interaction_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
